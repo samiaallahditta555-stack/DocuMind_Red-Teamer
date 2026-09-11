@@ -138,7 +138,7 @@ Every finding exposes:
 | PDF Parsing | pypdf |
 | DOCX Parsing | Python standard library / ZIP XML |
 | Analytics | Pandas |
-| Charts | Plotly |
+| Charts | Streamlit native visualization |
 | PDF Export | ReportLab |
 | Styling | Custom CSS + glassmorphism |
 | LLM API | **Not required** |
@@ -236,7 +236,7 @@ DocuMind uses a cyber-legal visual language:
 - emerald Safe signals
 - cyan RAG/AI context
 - large executive metrics
-- interactive Plotly charts
+- interactive Streamlit native visualization charts
 - expandable vulnerability cards
 - chat-style adversarial simulator
 - judge-friendly one-click samples
