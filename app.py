@@ -10,15 +10,6 @@ from typing import List, Dict, Tuple
 
 import numpy as np
 
-# FAISS is optional. Streamlit Cloud can run without it.
-try:
-    import faiss
-    FAISS_AVAILABLE = True
-except ImportError:
-    faiss = None
-    FAISS_AVAILABLE = False
-import pandas as pd
-import plotly.express as px
 import streamlit as st
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
@@ -570,7 +561,7 @@ def load_embedder():
 
 @st.cache_resource(show_spinner=False)
 def build_vector_store(chunks: Tuple[str, ...]):
-    """Build a local semantic vector store without requiring FAISS."""
+    """Build a local semantic vector store using NumPy only."""
     model = load_embedder()
     vectors = model.encode(
         list(chunks),
@@ -578,41 +569,22 @@ def build_vector_store(chunks: Tuple[str, ...]):
         show_progress_bar=False,
     )
     vectors = np.asarray(vectors, dtype="float32")
-
-    # If FAISS happens to be installed, use it. Otherwise NumPy is enough
-    # for this hackathon-scale document retrieval workload.
-    index = None
-    if FAISS_AVAILABLE and len(vectors):
-        index = faiss.IndexFlatIP(vectors.shape[1])
-        index.add(vectors)
-
-    return index, vectors
+    return vectors
 
 
 def retrieve(query: str, chunks: List[str], k: int = 4) -> List[Tuple[str, float]]:
     if not chunks:
         return []
 
-    index, vectors = build_vector_store(tuple(chunks))
+    vectors = build_vector_store(tuple(chunks))
     model = load_embedder()
     q = model.encode([query], normalize_embeddings=True, show_progress_bar=False)
-    q = np.asarray(q, dtype="float32")
+    q = np.asarray(q, dtype="float32")[0]
+
     limit = min(k, len(chunks))
-
-    if index is not None:
-        scores, ids = index.search(q, limit)
-        return [
-            (chunks[int(i)], float(s))
-            for i, s in zip(ids[0], scores[0])
-            if i >= 0
-        ]
-
-    # NumPy cosine similarity fallback. Embeddings are normalized, so
-    # a dot product is cosine similarity.
-    scores = vectors @ q[0]
+    scores = vectors @ q
     ids = np.argsort(scores)[::-1][:limit]
     return [(chunks[int(i)], float(scores[int(i)])) for i in ids]
-
 
 def deterministic_adversarial_answer(query: str, contexts: List[Tuple[str, float]], risks: List[Risk]) -> str:
     q = query.lower()
@@ -970,30 +942,35 @@ with tab1:
     left, right = st.columns([1.15, 1])
 
     with left:
-        fig = px.pie(
-            pd.DataFrame(
-                {
-                    "Severity": ["Critical", "Medium", "Low"],
-                    "Count": [
-                        sum(r.severity == "Critical" for r in risks),
-                        sum(r.severity == "Medium" for r in risks),
-                        sum(r.severity == "Low" for r in risks),
-                    ],
-                }
-            ),
-            names="Severity",
-            values="Count",
-            hole=0.58,
-            title="Severity Breakdown",
+        st.markdown(
+            '<div class="glass"><div class="section-title">📊 Severity Breakdown</div>',
+            unsafe_allow_html=True,
         )
-        fig.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font_color="#DDE5EF",
-            legend_title="",
-            margin=dict(l=10, r=10, t=55, b=10),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        critical_count = sum(r.severity.lower() == "critical" for r in risks)
+        medium_count = sum(r.severity.lower() == "medium" for r in risks)
+        low_count = sum(r.severity.lower() == "low" for r in risks)
+        total = max(1, len(risks))
+
+        severity_rows = [
+            ("🔴 Critical", critical_count, "#FF4B4B"),
+            ("🟠 Medium", medium_count, "#FF9F1C"),
+            ("🟢 Low", low_count, "#00E676"),
+        ]
+
+        for label, count, bar_color in severity_rows:
+            pct = (count / total) * 100
+            st.markdown(
+                f"""
+                <div style="display:flex;justify-content:space-between;margin-top:14px;">
+                    <span><b>{label}</b></span><span>{count}</span>
+                </div>
+                <div style="height:10px;background:rgba(255,255,255,.08);border-radius:8px;margin:6px 0 10px;">
+                    <div style="height:10px;width:{pct:.1f}%;background:{bar_color};border-radius:8px;"></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
         st.markdown('<div class="glass"><div class="section-title">🎯 Top deal-breakers</div>', unsafe_allow_html=True)
