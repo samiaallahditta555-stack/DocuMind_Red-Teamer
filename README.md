@@ -59,7 +59,7 @@ The document is split into legal-friendly chunks:
 - **Chunk size:** 800 characters
 - **Overlap:** 100 characters
 
-Chunks are embedded locally with `all-MiniLM-L6-v2` and indexed using **FAISS**.
+Chunks are converted into lightweight deterministic local vectors using **NumPy** and ranked with cosine similarity. This avoids NumPy vector retrieval, PyTorch, and model downloads on Streamlit Cloud.
 
 ### ⚔️ Red-team scenario simulator
 The user can ask questions such as:
@@ -113,7 +113,7 @@ Every finding exposes:
                     │
                     ▼
              ┌──────────────┐
-             │    FAISS     │
+             │    NumPy vector retrieval     │
              │ Vector Index │
              └──────┬───────┘
                     │
@@ -132,12 +132,12 @@ Every finding exposes:
 |---|---|
 | UI | Streamlit |
 | Language | Python |
-| Vector Search | FAISS |
-| Embeddings | Sentence Transformers |
+| Vector Search | NumPy cosine retrieval |
+| Embeddings | Deterministic local hashed vectors |
 | RAG | Local retrieval pipeline |
 | PDF Parsing | pypdf |
 | DOCX Parsing | Python standard library / ZIP XML |
-| Analytics | Pandas |
+| Analytics | Streamlit native tables |
 | Charts | Streamlit native visualization |
 | PDF Export | ReportLab |
 | Styling | Custom CSS + glassmorphism |
@@ -220,7 +220,7 @@ What happens if the vendor suffers a disaster?
 How can the renewal clause create lock-in?
 ```
 
-The simulator retrieves semantic document context using FAISS and connects the result to the detected red-team findings.
+The simulator retrieves semantic document context using NumPy vector retrieval and connects the result to the detected red-team findings.
 
 ---
 
@@ -358,7 +358,7 @@ Chunking
    ↓
 Local Embeddings
    ↓
-FAISS
+NumPy vector retrieval
    ↓
 Relevant Context
    ↓
@@ -407,7 +407,7 @@ The **Enforceability Score** is also heuristic and should be treated as a screen
 Only three files are required:
 
 ### `app.py`
-Complete Streamlit application, parsing, chunking, FAISS retrieval, red-team engine, dashboard, simulator, and exports.
+Complete Streamlit application, parsing, chunking, NumPy vector retrieval retrieval, red-team engine, dashboard, simulator, and exports.
 
 ### `requirements.txt`
 Pinned runtime dependencies.
