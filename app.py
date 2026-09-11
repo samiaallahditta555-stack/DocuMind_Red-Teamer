@@ -3,7 +3,7 @@ import io
 import json
 import streamlit as st
 
-# Safe import for Plotly to prevent hard app crashes on Streamlit Cloud
+# Safe Plotly Import
 try:
     import plotly.graph_objects as go
     import plotly.express as px
@@ -11,9 +11,25 @@ try:
 except ModuleNotFoundError:
     HAS_PLOTLY = False
 
-# PDF Processing
-import pdfplumber
-from pypdf import PdfReader
+# Safe PDF Processing Imports (Graceful Fallback)
+HAS_PDFPLUMBER = False
+HAS_PYPDF = False
+
+try:
+    import pdfplumber
+    HAS_PDFPLUMBER = True
+except ModuleNotFoundError:
+    pass
+
+try:
+    from pypdf import PdfReader
+    HAS_PYPDF = True
+except ModuleNotFoundError:
+    try:
+        from PyPDF2 import PdfReader
+        HAS_PYPDF = True
+    except ModuleNotFoundError:
+        pass
 
 # LangChain & Vector Store
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -51,9 +67,12 @@ if "chat_history" not in st.session_state:
 if "processed_filename" not in st.session_state:
     st.session_state.processed_filename = None
 
-# Missing module alert for user guidance
+# Missing Module Banners for Troubleshooting
+if not HAS_PDFPLUMBER and not HAS_PYPDF:
+    st.warning("⚠️ No PDF parsing library detected (`pdfplumber` or `pypdf`). You can still paste text directly or load the Sample Contract.")
+
 if not HAS_PLOTLY:
-    st.error("⚠️ `plotly` package is missing in your deployment environment! Please add `plotly` to your `requirements.txt` file and reboot the Streamlit Cloud app.")
+    st.info("💡 Note: `plotly` is not installed. Risk scorecard will display in text mode.")
 
 # ------------------------------------------------------------------------------
 # 2. CUSTOM CSS STYLING
@@ -168,19 +187,31 @@ This Agreement shall be governed by and construed in accordance with the laws of
 # ------------------------------------------------------------------------------
 def extract_text_from_pdf(pdf_file) -> str:
     text = ""
-    try:
-        with pdfplumber.open(pdf_file) as pdf:
-            for page in pdf.pages:
+    # Try pdfplumber first
+    if HAS_PDFPLUMBER:
+        try:
+            with pdfplumber.open(pdf_file) as pdf:
+                for page in pdf.pages:
+                    extracted = page.extract_text()
+                    if extracted:
+                        text += extracted + "\n"
+            if text.strip():
+                return text
+        except Exception:
+            pdf_file.seek(0)
+            
+    # Fallback to pypdf / PyPDF2
+    if HAS_PYPDF:
+        try:
+            reader = PdfReader(pdf_file)
+            for page in reader.pages:
                 extracted = page.extract_text()
                 if extracted:
                     text += extracted + "\n"
-    except Exception:
-        pdf_file.seek(0)
-        reader = PdfReader(pdf_file)
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
+            return text
+        except Exception as e:
+            st.error(f"Failed to read PDF: {str(e)}")
+            
     return text
 
 def build_vector_store(text: str, openai_api_key: str):
@@ -333,15 +364,14 @@ with st.sidebar:
 
     provider_choice = st.radio("LLM Provider", ["OpenAI", "Groq"])
 
-    # Fetch keys from st.secrets or env variables automatically
     default_openai_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "")
     default_groq_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY", "")
 
     if provider_choice == "OpenAI":
         api_key = st.text_input("OpenAI API Key", value=default_openai_key, type="password")
+        openai_embed_key = api_key
     else:
         api_key = st.text_input("Groq API Key", value=default_groq_key, type="password")
-        # OpenAI key needed for vector embeddings
         openai_embed_key = st.text_input("OpenAI Key (for Embeddings)", value=default_openai_key, type="password")
 
     st.divider()
@@ -392,13 +422,12 @@ if st.session_state.contract_text:
     st.info(f"📄 Active Document: **{st.session_state.processed_filename or 'Loaded Document'}** ({len(st.session_state.contract_text)} characters)")
     
     if st.button("🔍 Execute Red-Team Vulnerability Scan"):
-        embed_key = openai_embed_key if provider_choice == "Groq" else api_key
-        if not api_key or not embed_key:
+        if not api_key or not openai_embed_key:
             st.error("Please enter the required API Key(s) in the sidebar.")
         else:
             with st.spinner("Indexing text and running Red-Team Agent..."):
                 try:
-                    vstore = build_vector_store(st.session_state.contract_text, embed_key)
+                    vstore = build_vector_store(st.session_state.contract_text, openai_embed_key)
                     st.session_state.vectorstore = vstore
                     
                     results = run_red_team_analysis(vstore, contract_type, risk_tolerance, provider_choice, api_key)
