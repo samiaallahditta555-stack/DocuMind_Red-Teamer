@@ -8,8 +8,15 @@ import zipfile
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Tuple
 
-import faiss
 import numpy as np
+
+# FAISS is optional. Streamlit Cloud can run without it.
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    faiss = None
+    FAISS_AVAILABLE = False
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -562,7 +569,8 @@ def load_embedder():
 
 
 @st.cache_resource(show_spinner=False)
-def build_faiss(chunks: Tuple[str, ...]):
+def build_vector_store(chunks: Tuple[str, ...]):
+    """Build a local semantic vector store without requiring FAISS."""
     model = load_embedder()
     vectors = model.encode(
         list(chunks),
@@ -570,19 +578,40 @@ def build_faiss(chunks: Tuple[str, ...]):
         show_progress_bar=False,
     )
     vectors = np.asarray(vectors, dtype="float32")
-    index = faiss.IndexFlatIP(vectors.shape[1])
-    index.add(vectors)
+
+    # If FAISS happens to be installed, use it. Otherwise NumPy is enough
+    # for this hackathon-scale document retrieval workload.
+    index = None
+    if FAISS_AVAILABLE and len(vectors):
+        index = faiss.IndexFlatIP(vectors.shape[1])
+        index.add(vectors)
+
     return index, vectors
 
 
 def retrieve(query: str, chunks: List[str], k: int = 4) -> List[Tuple[str, float]]:
     if not chunks:
         return []
-    index, _ = build_faiss(tuple(chunks))
+
+    index, vectors = build_vector_store(tuple(chunks))
     model = load_embedder()
     q = model.encode([query], normalize_embeddings=True, show_progress_bar=False)
-    scores, ids = index.search(np.asarray(q, dtype="float32"), min(k, len(chunks)))
-    return [(chunks[int(i)], float(s)) for i, s in zip(ids[0], scores[0]) if i >= 0]
+    q = np.asarray(q, dtype="float32")
+    limit = min(k, len(chunks))
+
+    if index is not None:
+        scores, ids = index.search(q, limit)
+        return [
+            (chunks[int(i)], float(s))
+            for i, s in zip(ids[0], scores[0])
+            if i >= 0
+        ]
+
+    # NumPy cosine similarity fallback. Embeddings are normalized, so
+    # a dot product is cosine similarity.
+    scores = vectors @ q[0]
+    ids = np.argsort(scores)[::-1][:limit]
+    return [(chunks[int(i)], float(scores[int(i)])) for i in ids]
 
 
 def deterministic_adversarial_answer(query: str, contexts: List[Tuple[str, float]], risks: List[Risk]) -> str:
@@ -876,7 +905,7 @@ with st.spinner("Building local FAISS context + running red-team detectors..."):
 
 # Build FAISS lazily but show status.
 try:
-    _ = build_faiss(tuple(chunks))
+    _ = build_vector_store(tuple(chunks))
     rag_status = "FAISS ONLINE"
 except Exception as exc:
     rag_status = f"FAISS ERROR: {str(exc)[:45]}"
@@ -1042,7 +1071,7 @@ with tab2:
 
 with tab3:
     st.markdown('<div class="section-title">Adversarial Scenario Simulator</div>', unsafe_allow_html=True)
-    st.caption("Ask how a clause could be abused. Responses are grounded in the local FAISS retrieval index and detected findings.")
+    st.caption("Ask how a clause could be abused. Responses are grounded in the local semantic retrieval index and detected findings.")
 
     quick_prompts = [
         "How could a vendor exploit the contract to charge hidden fees?",
@@ -1078,7 +1107,7 @@ with tab3:
 
 with tab4:
     st.markdown('<div class="section-title">Transparency Layer</div>', unsafe_allow_html=True)
-    st.caption("Judge/debug mode: inspect extracted text and the exact semantic chunks indexed by FAISS.")
+    st.caption("Judge/debug mode: inspect extracted text and the exact semantic chunks indexed by the local vector retrieval backend.")
 
     r1, r2 = st.columns(2)
     with r1:
