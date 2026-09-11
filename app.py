@@ -2,8 +2,14 @@ import os
 import io
 import json
 import streamlit as st
-import plotly.graph_objects as go
-import plotly.express as px
+
+# Safe import for Plotly to prevent hard app crashes on Streamlit Cloud
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    HAS_PLOTLY = True
+except ModuleNotFoundError:
+    HAS_PLOTLY = False
 
 # PDF Processing
 import pdfplumber
@@ -15,6 +21,13 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+
+# Optional Groq Support
+try:
+    from langchain_groq import ChatGroq
+    HAS_GROQ = True
+except ImportError:
+    HAS_GROQ = False
 
 # ------------------------------------------------------------------------------
 # 1. PAGE CONFIGURATION & SESSION STATE INITIALIZATION
@@ -38,19 +51,20 @@ if "chat_history" not in st.session_state:
 if "processed_filename" not in st.session_state:
     st.session_state.processed_filename = None
 
+# Missing module alert for user guidance
+if not HAS_PLOTLY:
+    st.error("⚠️ `plotly` package is missing in your deployment environment! Please add `plotly` to your `requirements.txt` file and reboot the Streamlit Cloud app.")
+
 # ------------------------------------------------------------------------------
-# 2. CUSTOM CSS STYLING (CYBERSECURITY / LEGAL-TECH GLASSMORPHISM THEME)
+# 2. CUSTOM CSS STYLING
 # ------------------------------------------------------------------------------
 st.markdown("""
 <style>
-    /* Main App Background & Typography */
     .stApp {
         background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #111827 100%);
         color: #f8fafc;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
-
-    /* Glassmorphism Containers */
     div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column;"] > div {
         background: rgba(30, 41, 59, 0.4);
         backdrop-filter: blur(12px);
@@ -59,32 +73,16 @@ st.markdown("""
         padding: 1rem;
         box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
     }
-
-    /* Sidebar Styling */
     section[data-testid="stSidebar"] {
         background: rgba(15, 23, 42, 0.95);
         border-right: 1px solid rgba(99, 102, 241, 0.2);
     }
-
-    /* Metric Cards */
     div[data-testid="stMetric"] {
         background: rgba(15, 23, 42, 0.6);
         border: 1px solid rgba(99, 102, 241, 0.3);
         border-radius: 10px;
         padding: 12px 16px;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
     }
-    div[data-testid="stMetricLabel"] {
-        color: #94a3b8 !important;
-        font-weight: 600;
-        font-size: 0.85rem;
-    }
-    div[data-testid="stMetricValue"] {
-        color: #38bdf8 !important;
-        font-weight: 700;
-    }
-
-    /* Custom Badges */
     .badge-critical {
         background-color: rgba(239, 68, 68, 0.2);
         color: #fca5a5;
@@ -115,8 +113,6 @@ st.markdown("""
         font-weight: 700;
         display: inline-block;
     }
-
-    /* Side-by-side Clause Review Boxes */
     .clause-box-original {
         background: rgba(239, 68, 68, 0.08);
         border-left: 4px solid #ef4444;
@@ -144,38 +140,11 @@ st.markdown("""
         color: #e2e8f0;
         margin-bottom: 10px;
     }
-
-    /* Buttons & Interactive Elements */
-    .stButton > button {
-        background: linear-gradient(90deg, #6366f1 0%, #4f46e5 100%);
-        color: #ffffff;
-        border: none;
-        border-radius: 8px;
-        font-weight: 600;
-        padding: 0.5rem 1rem;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
-    }
-    .stButton > button:hover {
-        background: linear-gradient(90deg, #4f46e5 0%, #4338ca 100%);
-        box-shadow: 0 6px 18px rgba(99, 102, 241, 0.5);
-        transform: translateY(-1px);
-    }
-
-    /* Tab Header Customization */
-    button[data-baseweb="tab"] {
-        color: #94a3b8;
-        font-weight: 600;
-    }
-    button[aria-selected="true"] {
-        color: #6366f1 !important;
-        border-bottom-color: #6366f1 !important;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------------------
-# 3. SAMPLE CONTRACT DATA (FOR ONE-CLICK JUDGE DEMO)
+# 3. SAMPLE CONTRACT DATA
 # ------------------------------------------------------------------------------
 SAMPLE_SAAS_CONTRACT = """MASTER SERVICES AGREEMENT
 
@@ -195,10 +164,9 @@ This Agreement shall be governed by and construed in accordance with the laws of
 """
 
 # ------------------------------------------------------------------------------
-# 4. HELPER FUNCTIONS & RAG PROCESSING PIPELINE
+# 4. HELPER FUNCTIONS & RAG PIPELINE
 # ------------------------------------------------------------------------------
 def extract_text_from_pdf(pdf_file) -> str:
-    """Extract clean text content from PDF file upload."""
     text = ""
     try:
         with pdfplumber.open(pdf_file) as pdf:
@@ -207,7 +175,6 @@ def extract_text_from_pdf(pdf_file) -> str:
                 if extracted:
                     text += extracted + "\n"
     except Exception:
-        # Fallback to PyPDF if pdfplumber encounters formatting exceptions
         pdf_file.seek(0)
         reader = PdfReader(pdf_file)
         for page in reader.pages:
@@ -216,26 +183,35 @@ def extract_text_from_pdf(pdf_file) -> str:
                 text += extracted + "\n"
     return text
 
-def build_vector_store(text: str, api_key: str):
-    """Chunk text and construct in-memory FAISS vector store."""
+def build_vector_store(text: str, openai_api_key: str):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
         separators=["\n\n", "\n", " ", ""]
     )
     chunks = splitter.split_text(text)
-    embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+    embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
     vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
     return vectorstore
 
-def run_red_team_analysis(vectorstore: FAISS, contract_type: str, risk_tolerance: str, api_key: str):
-    """Execute adversarial scanning agent across contract vulnerability categories."""
-    llm = ChatOpenAI(
-        model="gpt-4o",
-        temperature=0.1,
-        openai_api_key=api_key,
-        response_format={"type": "json_object"}
-    )
+def get_llm_instance(provider: str, api_key: str):
+    if provider == "Groq" and HAS_GROQ:
+        return ChatGroq(
+            model_name="llama-3.3-70b-versatile",
+            groq_api_key=api_key,
+            temperature=0.1,
+            model_kwargs={"response_format": {"type": "json_object"}}
+        )
+    else:
+        return ChatOpenAI(
+            model="gpt-4o",
+            temperature=0.1,
+            openai_api_key=api_key,
+            response_format={"type": "json_object"}
+        )
+
+def run_red_team_analysis(vectorstore: FAISS, contract_type: str, risk_tolerance: str, provider: str, api_key: str):
+    llm = get_llm_instance(provider, api_key)
     
     categories = [
         "Indemnification & Liability Traps",
@@ -298,7 +274,6 @@ def run_red_team_analysis(vectorstore: FAISS, contract_type: str, risk_tolerance
             total_score += parsed.get("category_risk_score", 50)
             category_count += 1
         except Exception:
-            # Graceful fallback structure if LLM parsing fails
             analysis_results["categories"][category] = {
                 "category_risk_score": 60,
                 "findings": [{
@@ -315,35 +290,36 @@ def run_red_team_analysis(vectorstore: FAISS, contract_type: str, risk_tolerance
     overall_score = min(100, max(0, int(total_score / max(1, category_count))))
     analysis_results["overall_risk_score"] = overall_score
     
-    # Generate executive summary based on overall score
     if overall_score >= 70:
-        analysis_results["summary"] = "CRITICAL RISK PROFILE: This contract contains severe unilateral indemnities, potential IP loss, and aggressive renewal clauses. Do NOT sign without legal redlining."
+        analysis_results["summary"] = "CRITICAL RISK PROFILE: Severe unilateral indemnities, potential IP loss, and aggressive renewal clauses detected."
     elif overall_score >= 40:
-        analysis_results["summary"] = "MODERATE RISK PROFILE: Contract contains noticeable imbalances, missing liability caps, or unfavorable dispute terms. Negotiation recommended."
+        analysis_results["summary"] = "MODERATE RISK PROFILE: Noticeable imbalances, missing liability caps, or unfavorable dispute terms present."
     else:
-        analysis_results["summary"] = "LOW RISK PROFILE: Contract terms are largely standard and balanced, with minor ambiguities."
+        analysis_results["summary"] = "LOW RISK PROFILE: Contract terms are largely standard and balanced."
         
     return analysis_results
 
-def answer_rag_question(query: str, vectorstore: FAISS, api_key: str) -> str:
-    """Answer targeted user inquiries using contract RAG pipeline."""
+def answer_rag_question(query: str, vectorstore: FAISS, provider: str, api_key: str) -> str:
     retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
     docs = retriever.invoke(query)
     context = "\n\n".join([doc.page_content for doc in docs])
     
     prompt = ChatPromptTemplate.from_template("""
     You are DocuMind Red-Teamer, an AI legal expert assistant. Answer the user's question based strictly on the provided contract context.
-    Highlight hidden liabilities, implications, or missing protections where appropriate.
     
     Contract Context:
     {context}
     
     User Question: {question}
     
-    Answer clearly, concisely, and with legal precision:
+    Answer clearly and concisely:
     """)
     
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.2, openai_api_key=api_key)
+    if provider == "Groq" and HAS_GROQ:
+        llm = ChatGroq(model_name="llama-3.3-70b-versatile", groq_api_key=api_key, temperature=0.2)
+    else:
+        llm = ChatOpenAI(model="gpt-4o", temperature=0.2, openai_api_key=api_key)
+        
     chain = prompt | llm | StrOutputParser()
     return chain.invoke({"context": context, "question": query})
 
@@ -352,20 +328,24 @@ def answer_rag_question(query: str, vectorstore: FAISS, api_key: str) -> str:
 # ------------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## ⚖️🛡️ DocuMind Red-Teamer")
-    st.markdown("*Adversarial Legal Contract Vulnerability Scanner*")
+    st.markdown("*Adversarial Contract Vulnerability Scanner*")
     st.divider()
 
-    # API Key Handling
-    api_key = st.text_input("OpenAI API Key", type="password", help="Enter key to enable live analysis.")
-    if not api_key:
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        if api_key:
-            st.caption("🟢 Using environment OpenAI API Key")
-        else:
-            st.caption("🔴 Missing API Key. Enter key above to execute analyses.")
+    provider_choice = st.radio("LLM Provider", ["OpenAI", "Groq"])
+
+    # Fetch keys from st.secrets or env variables automatically
+    default_openai_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+    default_groq_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY", "")
+
+    if provider_choice == "OpenAI":
+        api_key = st.text_input("OpenAI API Key", value=default_openai_key, type="password")
+    else:
+        api_key = st.text_input("Groq API Key", value=default_groq_key, type="password")
+        # OpenAI key needed for vector embeddings
+        openai_embed_key = st.text_input("OpenAI Key (for Embeddings)", value=default_openai_key, type="password")
 
     st.divider()
-    st.markdown("### ⚙️ Analysis Parameters")
+    st.markdown("### ⚙️ Parameters")
     contract_type = st.selectbox(
         "Contract Category",
         ["SaaS Agreement / MSA", "Non-Disclosure Agreement (NDA)", "Employment Agreement", "Vendor/Procurement Contract", "M&A / Asset Purchase"]
@@ -378,20 +358,19 @@ with st.sidebar:
     )
 
     st.divider()
-    st.markdown("### 🚀 Instant Hackathon Demo")
-    if st.button("⚡ Load Sample SaaS Agreement"):
+    if st.button("⚡ Load Sample SaaS Contract"):
         st.session_state.contract_text = SAMPLE_SAAS_CONTRACT
         st.session_state.processed_filename = "Sample_SaaS_Master_Agreement.txt"
         st.success("Loaded Sample Contract!")
 
 # ------------------------------------------------------------------------------
-# 6. HEADER & MAIN INTERFACE
+# 6. MAIN INTERFACE
 # ------------------------------------------------------------------------------
 st.markdown("""
 <div style="display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px;">
     <div>
         <h1 style="margin: 0; color: #f8fafc; font-size: 2.2rem; font-weight: 800;">DocuMind Red-Teamer</h1>
-        <p style="color: #94a3b8; font-size: 1.05rem; margin-top: 4px;">Expose hidden legal traps, unilateral indemnities, and contract vulnerabilities before signing.</p>
+        <p style="color: #94a3b8; font-size: 1.05rem; margin-top: 4px;">Expose legal traps and contract vulnerabilities before signing.</p>
     </div>
     <div>
         <span class="badge-critical" style="font-size: 0.85rem; padding: 6px 14px;">AI Red-Teamer Active</span>
@@ -399,7 +378,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Contract Input / Upload Section
 uploaded_file = st.file_uploader("Upload Legal Document (.pdf, .txt)", type=["pdf", "txt"])
 
 if uploaded_file is not None and uploaded_file.name != st.session_state.processed_filename:
@@ -408,76 +386,65 @@ if uploaded_file is not None and uploaded_file.name != st.session_state.processe
     else:
         st.session_state.contract_text = uploaded_file.read().decode("utf-8")
     st.session_state.processed_filename = uploaded_file.name
-    st.session_state.redteam_results = None  # Reset prior results on new file
+    st.session_state.redteam_results = None
 
-# Trigger Scan Button
 if st.session_state.contract_text:
     st.info(f"📄 Active Document: **{st.session_state.processed_filename or 'Loaded Document'}** ({len(st.session_state.contract_text)} characters)")
     
     if st.button("🔍 Execute Red-Team Vulnerability Scan"):
-        if not api_key:
-            st.error("Please provide a valid OpenAI API Key in the sidebar to execute the scan.")
+        embed_key = openai_embed_key if provider_choice == "Groq" else api_key
+        if not api_key or not embed_key:
+            st.error("Please enter the required API Key(s) in the sidebar.")
         else:
-            with st.spinner("Building Vector Embeddings & Executing Adversarial RAG Analysis..."):
+            with st.spinner("Indexing text and running Red-Team Agent..."):
                 try:
-                    # Step 1: Ingest & Index
-                    vstore = build_vector_store(st.session_state.contract_text, api_key)
+                    vstore = build_vector_store(st.session_state.contract_text, embed_key)
                     st.session_state.vectorstore = vstore
                     
-                    # Step 2: Multi-Category Scan
-                    results = run_red_team_analysis(vstore, contract_type, risk_tolerance, api_key)
+                    results = run_red_team_analysis(vstore, contract_type, risk_tolerance, provider_choice, api_key)
                     st.session_state.redteam_results = results
-                    st.success("Red-Team Vulnerability Assessment Complete!")
+                    st.success("Analysis Complete!")
                 except Exception as e:
                     st.error(f"Execution Error: {str(e)}")
 
 # ------------------------------------------------------------------------------
-# 7. JUDGE-WINNING OUTPUT DASHBOARD (TABBED SYSTEM)
+# 7. DASHBOARD & TABS
 # ------------------------------------------------------------------------------
 if st.session_state.redteam_results is not None:
     results = st.session_state.redteam_results
     
     tab1, tab2, tab3, tab4 = st.tabs([
         "📊 Executive Risk Scorecard",
-        "🔴 Vulnerability Matrix & Redlines",
-        "💬 Ask the Red-Teamer (RAG Chat)",
+        "🔴 Vulnerability Matrix",
+        "💬 Ask the Red-Teamer",
         "📥 Audit Report Export"
     ])
 
-    # --------------------------------------------------------------------------
-    # TAB 1: EXECUTIVE SUMMARY & RISK SCORECARD
-    # --------------------------------------------------------------------------
     with tab1:
         col_gauge, col_metrics = st.columns([1, 1])
+        score = results["overall_risk_score"]
         
         with col_gauge:
-            score = results["overall_risk_score"]
-            gauge_fig = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=score,
-                title={'text': "Composite Contract Risk Index", 'font': {'size': 18, 'color': '#f8fafc'}},
-                number={'font': {'size': 48, 'color': '#ef4444' if score >= 70 else '#f59e0b' if score >= 40 else '#10b981'}},
-                gauge={
-                    'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "#f8fafc"},
-                    'bar': {'color': "#ef4444" if score >= 70 else "#f59e0b" if score >= 40 else "#10b981"},
-                    'bgcolor': "rgba(30, 41, 59, 0.5)",
-                    'borderwidth': 2,
-                    'bordercolor': "#6366f1",
-                    'steps': [
-                        {'range': [0, 40], 'color': 'rgba(16, 185, 129, 0.2)'},
-                        {'range': [40, 70], 'color': 'rgba(245, 158, 11, 0.2)'},
-                        {'range': [70, 100], 'color': 'rgba(239, 68, 68, 0.2)'}
-                    ],
-                }
-            ))
-            gauge_fig.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                font={'color': "#f8fafc"},
-                height=300,
-                margin=dict(l=20, r=20, t=40, b=20)
-            )
-            st.plotly_chart(gauge_fig, use_container_width=True)
+            if HAS_PLOTLY:
+                gauge_fig = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=score,
+                    title={'text': "Composite Risk Score", 'font': {'size': 18, 'color': '#f8fafc'}},
+                    number={'font': {'size': 48, 'color': '#ef4444' if score >= 70 else '#f59e0b' if score >= 40 else '#10b981'}},
+                    gauge={
+                        'axis': {'range': [0, 100]},
+                        'bar': {'color': "#ef4444" if score >= 70 else "#f59e0b" if score >= 40 else "#10b981"},
+                        'steps': [
+                            {'range': [0, 40], 'color': 'rgba(16, 185, 129, 0.2)'},
+                            {'range': [40, 70], 'color': 'rgba(245, 158, 11, 0.2)'},
+                            {'range': [70, 100], 'color': 'rgba(239, 68, 68, 0.2)'}
+                        ],
+                    }
+                ))
+                gauge_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font={'color': "#f8fafc"}, height=280)
+                st.plotly_chart(gauge_fig, use_container_width=True)
+            else:
+                st.metric("Composite Risk Score", f"{score}/100")
 
         with col_metrics:
             st.markdown("### Executive Findings")
@@ -488,139 +455,56 @@ if st.session_state.redteam_results is not None:
             warn_count = sum(1 for c in results["categories"].values() for f in c.get("findings", []) if f.get("severity") == "WARNING")
             safe_count = sum(1 for c in results["categories"].values() for f in c.get("findings", []) if f.get("severity") == "LOW RISK")
             
-            m1.metric("Critical Traps", f"{crit_count}", delta_color="inverse")
-            m2.metric("Warnings", f"{warn_count}", delta_color="off")
+            m1.metric("Critical Traps", f"{crit_count}")
+            m2.metric("Warnings", f"{warn_count}")
             m3.metric("Low Risk Items", f"{safe_count}")
 
-        st.divider()
-        
-        # Risk Breakdown Radar Chart
-        st.markdown("### Vulnerability Radar by Category")
-        categories = list(results["categories"].keys())
-        scores = [results["categories"][cat].get("category_risk_score", 0) for cat in categories]
-        
-        radar_fig = go.Figure(data=go.Scatterpolar(
-            r=scores + [scores[0]],
-            theta=categories + [categories[0]],
-            fill='toself',
-            fillcolor='rgba(239, 68, 68, 0.3)',
-            line=dict(color='#ef4444', width=2)
-        ))
-        radar_fig.update_layout(
-            polar=dict(
-                radialaxis=dict(visible=True, range=[0, 100], tickfont=dict(color='#94a3b8'), gridcolor='rgba(99, 102, 241, 0.2)'),
-                angularaxis=dict(tickfont=dict(color='#f8fafc', size=12), gridcolor='rgba(99, 102, 241, 0.2)'),
-                bgcolor='rgba(15, 23, 42, 0.6)'
-            ),
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            height=350,
-            margin=dict(l=40, r=40, t=20, b=20)
-        )
-        st.plotly_chart(radar_fig, use_container_width=True)
-
-    # --------------------------------------------------------------------------
-    # TAB 2: INTERACTIVE VULNERABILITY MATRIX & REDLINES
-    # --------------------------------------------------------------------------
     with tab2:
-        st.markdown("### Adversarial Findings & Auto-Redline Matrix")
-        
-        for category_name, cat_data in results["categories"].items():
-            cat_score = cat_data.get("category_risk_score", 0)
-            st.markdown(f"#### {category_name} (Risk Score: `{cat_score}/100`)")
-            
+        for cat_name, cat_data in results["categories"].items():
+            st.markdown(f"#### {cat_name} (Risk Score: `{cat_data.get('category_risk_score', 0)}/100`)")
             for finding in cat_data.get("findings", []):
                 severity = finding.get("severity", "WARNING")
-                badge_class = "badge-critical" if severity == "CRITICAL" else "badge-warning" if severity == "WARNING" else "badge-safe"
-                
                 with st.expander(f"[{severity}] {finding.get('title', 'Risk Item')}"):
-                    st.markdown(f'<span class="{badge_class}">{severity}</span>', unsafe_allow_html=True)
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    
                     c1, c2 = st.columns(2)
                     with c1:
-                        st.markdown("**Original Clause (Contract):**")
+                        st.markdown("**Original Clause:**")
                         st.markdown(f'<div class="clause-box-original">{finding.get("original_clause", "N/A")}</div>', unsafe_allow_html=True)
-                        
-                        st.markdown("**Exploit / Risk Analysis:**")
+                        st.markdown("**Exploit Analysis:**")
                         st.markdown(f'<div class="clause-box-exploit">{finding.get("exploit_analysis", "N/A")}</div>', unsafe_allow_html=True)
-                    
                     with c2:
-                        st.markdown("**Auto-Redline / Recommended Amendment:**")
+                        st.markdown("**Recommended Redline:**")
                         st.markdown(f'<div class="clause-box-redline">{finding.get("recommended_redline", "N/A")}</div>', unsafe_allow_html=True)
-            st.divider()
 
-    # --------------------------------------------------------------------------
-    # TAB 3: INTERACTIVE RAG CHATBOT ("ASK THE RED-TEAMER")
-    # --------------------------------------------------------------------------
     with tab3:
-        st.markdown("### Interactive Contract Red-Teamer Chat")
-        st.markdown("Ask specific legal questions regarding potential liabilities, indemnities, or clauses in this contract.")
-
-        # Suggested Questions for Judges
-        st.markdown("**Quick Prompt Ideas:**")
-        sp1, sp2, sp3 = st.columns(3)
-        if sp1.button("Who owns custom IP?"):
-            st.session_state.chat_history.append({"role": "user", "content": "Who owns custom IP created under this agreement?"})
-        if sp2.button("What is the liability cap?"):
-            st.session_state.chat_history.append({"role": "user", "content": "What is the total liability cap and are there exceptions?"})
-        if sp3.button("How can we terminate?"):
-            st.session_state.chat_history.append({"role": "user", "content": "How can we terminate this agreement and what are the notice periods?"})
-
-        # Display Chat History
+        st.markdown("### Ask Questions About This Contract")
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
 
-        # Process standard input or clicked prompt button
-        user_input = st.chat_input("Ask a question about this contract...")
-        
-        # Trigger if new input or button clicked
+        user_input = st.chat_input("Ask a question...")
         if user_input:
             st.session_state.chat_history.append({"role": "user", "content": user_input})
             with st.chat_message("user"):
                 st.write(user_input)
 
-        if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
-            latest_query = st.session_state.chat_history[-1]["content"]
             with st.chat_message("assistant"):
-                with st.spinner("Analyzing contract text via RAG..."):
-                    if st.session_state.vectorstore and api_key:
-                        bot_response = answer_rag_question(latest_query, st.session_state.vectorstore, api_key)
-                    else:
-                        bot_response = "Vector store or API key missing. Please rerun the Red-Team analysis scan first."
-                    st.write(bot_response)
-                    st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
+                if st.session_state.vectorstore and api_key:
+                    bot_response = answer_rag_question(user_input, st.session_state.vectorstore, provider_choice, api_key)
+                else:
+                    bot_response = "Please run the scan first."
+                st.write(bot_response)
+                st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
 
-    # --------------------------------------------------------------------------
-    # TAB 4: ONE-CLICK AUDIT REPORT EXPORT
-    # --------------------------------------------------------------------------
     with tab4:
-        st.markdown("### Export Red-Team Vulnerability Report")
-        st.markdown("Download a comprehensive legal assessment report summarizing identified risks, exploit analyses, and proposed redlines.")
-        
-        # Format Markdown Report Document
-        report_md = f"# DOCUMIND RED-TEAM VULNERABILITY AUDIT REPORT\n\n"
-        report_md += f"**Document:** {st.session_state.processed_filename or 'Contract'}\n"
-        report_md += f"**Overall Risk Index:** {results['overall_risk_score']}/100\n"
-        report_md += f"**Executive Summary:** {results['summary']}\n\n"
-        report_md += "="*60 + "\n\n"
-        
+        report_md = f"# RED-TEAM AUDIT REPORT\n\nScore: {results['overall_risk_score']}/100\nSummary: {results['summary']}\n\n"
         for cat_name, cat_data in results["categories"].items():
-            report_md += f"## Category: {cat_name}\n"
-            report_md += f"**Category Risk Score:** {cat_data.get('category_risk_score', 0)}/100\n\n"
+            report_md += f"## {cat_name}\n Score: {cat_data.get('category_risk_score', 0)}/100\n"
             for f in cat_data.get("findings", []):
-                report_md += f"### [{f.get('severity')}] {f.get('title')}\n"
-                report_md += f"- **Original Clause:** {f.get('original_clause')}\n"
-                report_md += f"- **Exploit Analysis:** {f.get('exploit_analysis')}\n"
-                report_md += f"- **Recommended Redline:** {f.get('recommended_redline')}\n\n"
-            report_md += "-"*40 + "\n\n"
-            
-        st.code(report_md[:1500] + "\n\n... [Full Report Preview Truncated] ...", language="markdown")
+                report_md += f"### [{f.get('severity')}] {f.get('title')}\n- Clause: {f.get('original_clause')}\n- Exploit: {f.get('exploit_analysis')}\n- Redline: {f.get('recommended_redline')}\n\n"
         
         st.download_button(
-            label="📥 Download Full Red-Team Audit Report (.md)",
+            label="📥 Download Audit Report (.md)",
             data=report_md,
-            file_name=f"DocuMind_RedTeam_Report_{st.session_state.processed_filename or 'Contract'}.md",
+            file_name="DocuMind_RedTeam_Report.md",
             mime="text/markdown"
         )
