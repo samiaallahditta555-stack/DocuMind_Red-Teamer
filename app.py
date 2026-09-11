@@ -1,539 +1,1113 @@
-import os
 import io
+import re
+import html
 import json
+import textwrap
+import hashlib
+import zipfile
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Tuple
+
+import faiss
+import numpy as np
+import pandas as pd
+import plotly.express as px
 import streamlit as st
+from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
 
-# Safe Plotly Import
-try:
-    import plotly.graph_objects as go
-    import plotly.express as px
-    HAS_PLOTLY = True
-except ModuleNotFoundError:
-    HAS_PLOTLY = False
 
-# Safe PDF Processing Imports (Graceful Fallback)
-HAS_PDFPLUMBER = False
-HAS_PYPDF = False
+# ============================================================
+# DocuMind Red-Teamer
+# Local-first legal-contract red-team dashboard.
+# No paid API or external LLM is required.
+# ============================================================
 
-try:
-    import pdfplumber
-    HAS_PDFPLUMBER = True
-except ModuleNotFoundError:
-    pass
-
-try:
-    from pypdf import PdfReader
-    HAS_PYPDF = True
-except ModuleNotFoundError:
-    try:
-        from PyPDF2 import PdfReader
-        HAS_PYPDF = True
-    except ModuleNotFoundError:
-        pass
-
-# LangChain & Vector Store
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-
-# Optional Groq Support
-try:
-    from langchain_groq import ChatGroq
-    HAS_GROQ = True
-except ImportError:
-    HAS_GROQ = False
-
-# ------------------------------------------------------------------------------
-# 1. PAGE CONFIGURATION & SESSION STATE INITIALIZATION
-# ------------------------------------------------------------------------------
 st.set_page_config(
-    page_title="DocuMind Red-Teamer | Legal Contract Vulnerability Agent",
+    page_title="DocuMind Red-Teamer",
     page_icon="🛡️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Initialize Session States
-if "vectorstore" not in st.session_state:
-    st.session_state.vectorstore = None
-if "contract_text" not in st.session_state:
-    st.session_state.contract_text = ""
-if "redteam_results" not in st.session_state:
-    st.session_state.redteam_results = None
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "processed_filename" not in st.session_state:
-    st.session_state.processed_filename = None
+# ----------------------------- CSS -----------------------------
 
-# Missing Module Banners for Troubleshooting
-if not HAS_PDFPLUMBER and not HAS_PYPDF:
-    st.warning("⚠️ No PDF parsing library detected (`pdfplumber` or `pypdf`). You can still paste text directly or load the Sample Contract.")
-
-if not HAS_PLOTLY:
-    st.info("💡 Note: `plotly` is not installed. Risk scorecard will display in text mode.")
-
-# ------------------------------------------------------------------------------
-# 2. CUSTOM CSS STYLING
-# ------------------------------------------------------------------------------
-st.markdown("""
+st.markdown(
+    """
 <style>
-    .stApp {
-        background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #111827 100%);
-        color: #f8fafc;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    }
-    div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column;"] > div {
-        background: rgba(30, 41, 59, 0.4);
-        backdrop-filter: blur(12px);
-        border-radius: 12px;
-        border: 1px solid rgba(99, 102, 241, 0.2);
-        padding: 1rem;
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-    }
-    section[data-testid="stSidebar"] {
-        background: rgba(15, 23, 42, 0.95);
-        border-right: 1px solid rgba(99, 102, 241, 0.2);
-    }
-    div[data-testid="stMetric"] {
-        background: rgba(15, 23, 42, 0.6);
-        border: 1px solid rgba(99, 102, 241, 0.3);
-        border-radius: 10px;
-        padding: 12px 16px;
-    }
-    .badge-critical {
-        background-color: rgba(239, 68, 68, 0.2);
-        color: #fca5a5;
-        border: 1px solid #ef4444;
-        padding: 4px 10px;
-        border-radius: 20px;
-        font-size: 0.75rem;
-        font-weight: 700;
-        display: inline-block;
-    }
-    .badge-warning {
-        background-color: rgba(245, 158, 11, 0.2);
-        color: #fde047;
-        border: 1px solid #f59e0b;
-        padding: 4px 10px;
-        border-radius: 20px;
-        font-size: 0.75rem;
-        font-weight: 700;
-        display: inline-block;
-    }
-    .badge-safe {
-        background-color: rgba(16, 185, 129, 0.2);
-        color: #6ee7b7;
-        border: 1px solid #10b981;
-        padding: 4px 10px;
-        border-radius: 20px;
-        font-size: 0.75rem;
-        font-weight: 700;
-        display: inline-block;
-    }
-    .clause-box-original {
-        background: rgba(239, 68, 68, 0.08);
-        border-left: 4px solid #ef4444;
-        padding: 12px;
-        border-radius: 4px;
-        font-size: 0.9rem;
-        color: #e2e8f0;
-        margin-bottom: 10px;
-    }
-    .clause-box-exploit {
-        background: rgba(245, 158, 11, 0.08);
-        border-left: 4px solid #f59e0b;
-        padding: 12px;
-        border-radius: 4px;
-        font-size: 0.9rem;
-        color: #e2e8f0;
-        margin-bottom: 10px;
-    }
-    .clause-box-redline {
-        background: rgba(16, 185, 129, 0.08);
-        border-left: 4px solid #10b981;
-        padding: 12px;
-        border-radius: 4px;
-        font-size: 0.9rem;
-        color: #e2e8f0;
-        margin-bottom: 10px;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap');
+
+:root {
+    --bg: #0d1117;
+    --panel: rgba(255,255,255,.035);
+    --border: rgba(255,255,255,.10);
+    --crimson: #FF4B4B;
+    --amber: #FF9F1C;
+    --green: #00E676;
+    --cyan: #00B4D8;
+    --purple: #9B5DE5;
+    --text: #F5F7FA;
+    --muted: #9CA8B8;
+}
+
+.stApp {
+    background:
+      radial-gradient(circle at 8% 5%, rgba(255,75,75,.12), transparent 25%),
+      radial-gradient(circle at 90% 12%, rgba(0,180,216,.11), transparent 26%),
+      radial-gradient(circle at 70% 85%, rgba(155,93,229,.12), transparent 30%),
+      linear-gradient(135deg, #0d1117 0%, #161b22 50%, #1a102f 100%);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+}
+
+section[data-testid="stSidebar"] {
+    background: rgba(22, 27, 34, 0.80);
+    border-right: 1px solid rgba(255,255,255,.08);
+    position: relative;
+}
+section[data-testid="stSidebar"]::after {
+    content: "";
+    position: absolute;
+    top: 0; bottom: 0; right: -2px; width: 2px;
+    background: linear-gradient(180deg, #FF4B4B, #FF9F1C, #00B4D8, #9B5DE5);
+    box-shadow: 0 0 18px rgba(0,180,216,.55);
+}
+
+.hero {
+    padding: 26px 30px;
+    border-radius: 24px;
+    margin-bottom: 18px;
+    background:
+      linear-gradient(135deg, rgba(255,75,75,.13), rgba(0,180,216,.08) 45%, rgba(155,93,229,.13));
+    border: 1px solid rgba(255,255,255,.12);
+    box-shadow: 0 18px 60px rgba(0,0,0,.28);
+    backdrop-filter: blur(12px);
+}
+.hero h1 {
+    margin: 0;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 42px;
+    letter-spacing: -1.5px;
+}
+.hero p {
+    color: #C8D1DC;
+    margin: 7px 0 0;
+    font-size: 16px;
+}
+.badge {
+    display: inline-block;
+    margin-top: 15px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: .3px;
+    background: rgba(0,180,216,.10);
+    border: 1px solid rgba(0,180,216,.35);
+    color: #7BE8FF;
+    box-shadow: 0 0 18px rgba(0,180,216,.13);
+}
+
+.glass {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 18px;
+    padding: 18px;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 12px 40px rgba(0,0,0,.18);
+}
+.metric-card {
+    background: rgba(255,255,255,0.035);
+    border: 1px solid rgba(255,255,255,.10);
+    border-radius: 18px;
+    padding: 18px 20px;
+    min-height: 112px;
+}
+.metric-label {
+    color: #9CA8B8;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.metric-value {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 32px;
+    font-weight: 800;
+    margin-top: 5px;
+}
+.metric-sub {
+    color: #8995A5;
+    font-size: 12px;
+    margin-top: 3px;
+}
+
+.risk-card {
+    background: rgba(255,255,255,0.035);
+    border: 1px solid rgba(255,255,255,.10);
+    border-radius: 18px;
+    padding: 18px;
+    margin: 9px 0;
+    backdrop-filter: blur(10px);
+}
+.risk-card.critical { border-left: 4px solid #FF4B4B; box-shadow: -6px 0 24px rgba(255,75,75,.08); }
+.risk-card.medium { border-left: 4px solid #FF9F1C; box-shadow: -6px 0 24px rgba(255,159,28,.07); }
+.risk-card.low { border-left: 4px solid #00B4D8; }
+.risk-card.safe { border-left: 4px solid #00E676; }
+
+.severity {
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: .7px;
+    padding: 5px 9px;
+    border-radius: 999px;
+    display: inline-block;
+}
+.severity.critical { color:#FF7B7B; background:rgba(255,75,75,.11); border:1px solid rgba(255,75,75,.35); }
+.severity.medium { color:#FFC46B; background:rgba(255,159,28,.11); border:1px solid rgba(255,159,28,.35); }
+.severity.low { color:#72E7FF; background:rgba(0,180,216,.11); border:1px solid rgba(0,180,216,.35); }
+.severity.safe { color:#6DFFB2; background:rgba(0,230,118,.10); border:1px solid rgba(0,230,118,.30); }
+
+.section-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 22px;
+    font-weight: 700;
+    margin: 4px 0 12px;
+}
+.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+div.stButton > button, div.stDownloadButton > button {
+    border-radius: 12px;
+    border: 1px solid rgba(0,180,216,.30);
+    background: rgba(0,180,216,.07);
+    color: #DDFBFF;
+    font-weight: 700;
+    transition: .2s ease;
+}
+div.stButton > button:hover, div.stDownloadButton > button:hover {
+    border-color: #00B4D8;
+    box-shadow: 0 0 22px rgba(0,180,216,.22);
+    transform: translateY(-1px);
+}
+.stProgress > div > div > div > div { background-image: linear-gradient(90deg,#FF4B4B,#FF9F1C,#00E676); }
+
+[data-testid="stChatMessage"] {
+    background: rgba(255,255,255,.025);
+    border: 1px solid rgba(255,255,255,.07);
+    border-radius: 16px;
+}
+.small-muted { color:#8F9AAA; font-size:12px; }
+.warning-box {
+    padding: 12px 14px; border-radius: 12px;
+    background: rgba(255,159,28,.08);
+    border: 1px solid rgba(255,159,28,.25);
+    color: #FFD28A;
+}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-# ------------------------------------------------------------------------------
-# 3. SAMPLE CONTRACT DATA
-# ------------------------------------------------------------------------------
-SAMPLE_SAAS_CONTRACT = """MASTER SERVICES AGREEMENT
 
-This Master Services Agreement ("Agreement") is entered into by and between CloudScale Systems Inc. ("Provider") and the customer agreeing to these terms ("Client").
+# --------------------------- Data model ------------------------
 
-1. INDEMNIFICATION AND LIABILITY TRAPS
-Client agrees to defend, indemnify, and hold harmless Provider, its officers, directors, and employees from and against any and all claims, damages, liabilities, losses, costs, and expenses (including attorneys' fees) arising out of or related to Client's use of the Services, regardless of whether caused by Provider's negligence or willful misconduct. PROVIDER'S TOTAL AGGREGATE LIABILITY ARISING OUT OF OR RELATED TO THIS AGREEMENT SHALL BE LIMITED TO $100. PROVIDER SHALL NOT BE LIABLE FOR ANY INDIRECT, CONSEQUENTIAL, OR SPECIAL DAMAGES UNDER ANY CIRCUMSTANCES.
+@dataclass
+class Risk:
+    severity: str
+    category: str
+    title: str
+    clause: str
+    explanation: str
+    recommendation: str
+    section: str
+    confidence: int
 
-2. INTELLECTUAL PROPERTY RIGHTS & OWNERSHIP LEAKAGE
-All deliverables, custom code, workflows, inventions, modifications, and enhancements developed or created by Provider or Client during the term of this Agreement shall be the sole and exclusive property of Provider. Client hereby assigns all right, title, and interest in any intellectual property created during the performance of this agreement to Provider, including proprietary Client business data embedded within custom models.
 
-3. TERMINATION AND RENEWAL HAZARDS
-This Agreement shall automatically renew for successive 3-year terms unless Client provides written notice of non-renewal at least 180 days prior to the expiration of the then-current term. Provider may terminate this Agreement immediately for convenience without notice and without refund of any prepaid fees. In the event of Client's termination, all remaining unpaid fees for the full term shall become immediately due and payable.
+# ------------------------- Sample contracts --------------------
 
-4. JURISDICTION, DISPUTE RESOLUTION, AND AMBIGUITY
-This Agreement shall be governed by and construed in accordance with the laws of the Cayman Islands, without regard to conflict of law principles. Any dispute arising out of or in connection with this Agreement shall be settled by binding arbitration in London, UK, conducted in English. Client waives any right to jury trial or participation in class actions. Fees for arbitration shall be split equally, and the prevailing party shall not be entitled to recover legal fees.
-"""
+SAMPLES = {
+    "Exploitative NDA": """
+MUTUAL CONFIDENTIALITY AGREEMENT
 
-# ------------------------------------------------------------------------------
-# 4. HELPER FUNCTIONS & RAG PIPELINE
-# ------------------------------------------------------------------------------
-def extract_text_from_pdf(pdf_file) -> str:
-    text = ""
-    # Try pdfplumber first
-    if HAS_PDFPLUMBER:
-        try:
-            with pdfplumber.open(pdf_file) as pdf:
-                for page in pdf.pages:
-                    extracted = page.extract_text()
-                    if extracted:
-                        text += extracted + "\n"
-            if text.strip():
-                return text
-        except Exception:
-            pdf_file.seek(0)
-            
-    # Fallback to pypdf / PyPDF2
-    if HAS_PYPDF:
-        try:
-            reader = PdfReader(pdf_file)
-            for page in reader.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    text += extracted + "\n"
-            return text
-        except Exception as e:
-            st.error(f"Failed to read PDF: {str(e)}")
-            
-    return text
+1. Confidential Information
+All information disclosed by either party shall be confidential.
 
-def build_vector_store(text: str, openai_api_key: str):
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        separators=["\n\n", "\n", " ", ""]
-    )
-    chunks = splitter.split_text(text)
-    embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-    vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
-    return vectorstore
+2. Term
+This Agreement shall remain effective for ten (10) years. Confidentiality obligations survive forever.
 
-def get_llm_instance(provider: str, api_key: str):
-    if provider == "Groq" and HAS_GROQ:
-        return ChatGroq(
-            model_name="llama-3.3-70b-versatile",
-            groq_api_key=api_key,
-            temperature=0.1,
-            model_kwargs={"response_format": {"type": "json_object"}}
-        )
-    else:
-        return ChatOpenAI(
-            model="gpt-4o",
-            temperature=0.1,
-            openai_api_key=api_key,
-            response_format={"type": "json_object"}
-        )
+3. Remedies
+The Receiving Party shall indemnify the Disclosing Party for any and all losses, costs, claims, damages, penalties, attorneys' fees and expenses arising from any disclosure, without limitation.
 
-def run_red_team_analysis(vectorstore: FAISS, contract_type: str, risk_tolerance: str, provider: str, api_key: str):
-    llm = get_llm_instance(provider, api_key)
-    
-    categories = [
-        "Indemnification & Liability Traps",
-        "IP Ownership Leakage",
-        "Termination & Renewal Hazards",
-        "Jurisdiction & Dispute Ambiguities"
-    ]
-    
-    analysis_results = {
-        "overall_risk_score": 0,
-        "summary": "",
-        "categories": {}
-    }
-    
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-    
-    prompt_template = ChatPromptTemplate.from_template("""
-    You are an expert Legal Red-Teamer and Senior Corporate Counsel performing adversarial analysis on a contract.
-    Analyze the provided legal text excerpts specifically for vulnerabilities, traps, and high-risk terms related to: **{category}**.
-    
-    Contract Type: {contract_type}
-    Risk Tolerance Level: {risk_tolerance}
-    
-    Contract Excerpts:
-    {context}
-    
-    Respond in strict JSON format with the following structure:
-    {{
-      "category_risk_score": <number between 0 and 100 representing risk level>,
-      "findings": [
-        {{
-          "severity": "CRITICAL" | "WARNING" | "LOW RISK",
-          "title": "<Brief title of issue>",
-          "original_clause": "<Exact quote or near-quote from contract>",
-          "exploit_analysis": "<Detailed explanation of how the counterparty could abuse or exploit this clause>",
-          "recommended_redline": "<Specific, ready-to-use amended text that protects our client>"
-        }}
-      ]
-    }}
-    """)
-    
-    total_score = 0
-    category_count = 0
+4. Intellectual Property
+All ideas, improvements, suggestions, derivative works, feedback, and inventions disclosed or created during discussions shall belong exclusively to the Disclosing Party.
 
-    for category in categories:
-        docs = retriever.invoke(category)
-        context = "\n\n".join([doc.page_content for doc in docs])
-        
-        chain = prompt_template | llm | StrOutputParser()
-        raw_response = chain.invoke({
-            "category": category,
-            "contract_type": contract_type,
-            "risk_tolerance": risk_tolerance,
-            "context": context
-        })
-        
-        try:
-            parsed = json.loads(raw_response)
-            analysis_results["categories"][category] = parsed
-            total_score += parsed.get("category_risk_score", 50)
-            category_count += 1
-        except Exception:
-            analysis_results["categories"][category] = {
-                "category_risk_score": 60,
-                "findings": [{
-                    "severity": "WARNING",
-                    "title": f"Potential risk identified in {category}",
-                    "original_clause": "Refer to context clauses.",
-                    "exploit_analysis": "Ambiguous terms may expose your organization to liabilities.",
-                    "recommended_redline": "Insert mutual liability protections and standard caps."
-                }]
-            }
-            total_score += 60
-            category_count += 1
+5. Termination
+The Disclosing Party may terminate this Agreement at any time, without notice. The Receiving Party may not terminate this Agreement.
 
-    overall_score = min(100, max(0, int(total_score / max(1, category_count))))
-    analysis_results["overall_risk_score"] = overall_score
-    
-    if overall_score >= 70:
-        analysis_results["summary"] = "CRITICAL RISK PROFILE: Severe unilateral indemnities, potential IP loss, and aggressive renewal clauses detected."
-    elif overall_score >= 40:
-        analysis_results["summary"] = "MODERATE RISK PROFILE: Noticeable imbalances, missing liability caps, or unfavorable dispute terms present."
-    else:
-        analysis_results["summary"] = "LOW RISK PROFILE: Contract terms are largely standard and balanced."
-        
-    return analysis_results
+6. Dispute Resolution
+Any dispute shall be resolved by binding arbitration in a location selected by the Disclosing Party. The arbitrator's decision shall be final.
 
-def answer_rag_question(query: str, vectorstore: FAISS, provider: str, api_key: str) -> str:
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-    docs = retriever.invoke(query)
-    context = "\n\n".join([doc.page_content for doc in docs])
-    
-    prompt = ChatPromptTemplate.from_template("""
-    You are DocuMind Red-Teamer, an AI legal expert assistant. Answer the user's question based strictly on the provided contract context.
-    
-    Contract Context:
-    {context}
-    
-    User Question: {question}
-    
-    Answer clearly and concisely:
-    """)
-    
-    if provider == "Groq" and HAS_GROQ:
-        llm = ChatGroq(model_name="llama-3.3-70b-versatile", groq_api_key=api_key, temperature=0.2)
-    else:
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.2, openai_api_key=api_key)
-        
-    chain = prompt | llm | StrOutputParser()
-    return chain.invoke({"context": context, "question": query})
+7. Data
+The Receiving Party may process personal information as reasonably necessary. No separate privacy, security, retention, deletion, or breach-notification requirements apply.
+""",
+    "Unfair SaaS SLA": """
+SOFTWARE-AS-A-SERVICE AGREEMENT
 
-# ------------------------------------------------------------------------------
-# 5. SIDEBAR CONTROLS
-# ------------------------------------------------------------------------------
-with st.sidebar:
-    st.markdown("## ⚖️🛡️ DocuMind Red-Teamer")
-    st.markdown("*Adversarial Contract Vulnerability Scanner*")
-    st.divider()
+1. Fees
+Customer shall pay the fees stated in the Order Form plus any service, platform, processing, support, storage, security, integration, or administrative fees introduced by Provider from time to time.
 
-    provider_choice = st.radio("LLM Provider", ["OpenAI", "Groq"])
+2. Changes
+Provider may change pricing and service terms at any time. Continued use constitutes acceptance.
 
-    default_openai_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "")
-    default_groq_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY", "")
+3. Availability
+Provider will use commercially reasonable efforts to provide the service. No uptime commitment, service credit, or measurable performance target is guaranteed.
 
-    if provider_choice == "OpenAI":
-        api_key = st.text_input("OpenAI API Key", value=default_openai_key, type="password")
-        openai_embed_key = api_key
-    else:
-        api_key = st.text_input("Groq API Key", value=default_groq_key, type="password")
-        openai_embed_key = st.text_input("OpenAI Key (for Embeddings)", value=default_openai_key, type="password")
+4. Suspension
+Provider may immediately suspend access for any reason, including suspected misuse, without prior notice or cure period.
 
-    st.divider()
-    st.markdown("### ⚙️ Parameters")
-    contract_type = st.selectbox(
-        "Contract Category",
-        ["SaaS Agreement / MSA", "Non-Disclosure Agreement (NDA)", "Employment Agreement", "Vendor/Procurement Contract", "M&A / Asset Purchase"]
-    )
-    
-    risk_tolerance = st.select_slider(
-        "Risk Tolerance",
-        options=["Strict (Protect Us)", "Moderate (Balanced)", "Aggressive (Deal-First)"],
-        value="Strict (Protect Us)"
-    )
+5. Liability
+Customer agrees to indemnify Provider for all claims, losses, damages, costs, and expenses arising out of Customer's use of the service, with no cap.
 
-    st.divider()
-    if st.button("⚡ Load Sample SaaS Contract"):
-        st.session_state.contract_text = SAMPLE_SAAS_CONTRACT
-        st.session_state.processed_filename = "Sample_SaaS_Master_Agreement.txt"
-        st.success("Loaded Sample Contract!")
+6. Termination
+Provider may terminate immediately for convenience. Customer receives no refund for prepaid fees.
 
-# ------------------------------------------------------------------------------
-# 6. MAIN INTERFACE
-# ------------------------------------------------------------------------------
-st.markdown("""
-<div style="display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px;">
-    <div>
-        <h1 style="margin: 0; color: #f8fafc; font-size: 2.2rem; font-weight: 800;">DocuMind Red-Teamer</h1>
-        <p style="color: #94a3b8; font-size: 1.05rem; margin-top: 4px;">Expose legal traps and contract vulnerabilities before signing.</p>
-    </div>
-    <div>
-        <span class="badge-critical" style="font-size: 0.85rem; padding: 6px 14px;">AI Red-Teamer Active</span>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+7. Force Majeure
+No force majeure provision is provided.
 
-uploaded_file = st.file_uploader("Upload Legal Document (.pdf, .txt)", type=["pdf", "txt"])
+8. Privacy and Security
+Provider may process Customer Data as necessary to provide services. No specific breach notification deadline, deletion obligation, or security standard is stated.
+""",
+    "Vendor Lock-in Contract": """
+ENTERPRISE VENDOR SERVICES AGREEMENT
 
-if uploaded_file is not None and uploaded_file.name != st.session_state.processed_filename:
-    if uploaded_file.type == "application/pdf":
-        st.session_state.contract_text = extract_text_from_pdf(uploaded_file)
-    else:
-        st.session_state.contract_text = uploaded_file.read().decode("utf-8")
-    st.session_state.processed_filename = uploaded_file.name
-    st.session_state.redteam_results = None
+1. Exclusivity
+Customer shall purchase all services in the covered category exclusively from Vendor during the Term.
 
-if st.session_state.contract_text:
-    st.info(f"📄 Active Document: **{st.session_state.processed_filename or 'Loaded Document'}** ({len(st.session_state.contract_text)} characters)")
-    
-    if st.button("🔍 Execute Red-Team Vulnerability Scan"):
-        if not api_key or not openai_embed_key:
-            st.error("Please enter the required API Key(s) in the sidebar.")
-        else:
-            with st.spinner("Indexing text and running Red-Team Agent..."):
-                try:
-                    vstore = build_vector_store(st.session_state.contract_text, openai_embed_key)
-                    st.session_state.vectorstore = vstore
-                    
-                    results = run_red_team_analysis(vstore, contract_type, risk_tolerance, provider_choice, api_key)
-                    st.session_state.redteam_results = results
-                    st.success("Analysis Complete!")
-                except Exception as e:
-                    st.error(f"Execution Error: {str(e)}")
+2. Term
+The initial term is five years and automatically renews for additional five-year periods unless Customer gives notice at least 180 days before renewal.
 
-# ------------------------------------------------------------------------------
-# 7. DASHBOARD & TABS
-# ------------------------------------------------------------------------------
-if st.session_state.redteam_results is not None:
-    results = st.session_state.redteam_results
-    
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📊 Executive Risk Scorecard",
-        "🔴 Vulnerability Matrix",
-        "💬 Ask the Red-Teamer",
-        "📥 Audit Report Export"
-    ])
+3. Exit
+Customer may not terminate for convenience. Early termination requires payment of all remaining committed fees.
 
-    with tab1:
-        col_gauge, col_metrics = st.columns([1, 1])
-        score = results["overall_risk_score"]
-        
-        with col_gauge:
-            if HAS_PLOTLY:
-                gauge_fig = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=score,
-                    title={'text': "Composite Risk Score", 'font': {'size': 18, 'color': '#f8fafc'}},
-                    number={'font': {'size': 48, 'color': '#ef4444' if score >= 70 else '#f59e0b' if score >= 40 else '#10b981'}},
-                    gauge={
-                        'axis': {'range': [0, 100]},
-                        'bar': {'color': "#ef4444" if score >= 70 else "#f59e0b" if score >= 40 else "#10b981"},
-                        'steps': [
-                            {'range': [0, 40], 'color': 'rgba(16, 185, 129, 0.2)'},
-                            {'range': [40, 70], 'color': 'rgba(245, 158, 11, 0.2)'},
-                            {'range': [70, 100], 'color': 'rgba(239, 68, 68, 0.2)'}
-                        ],
-                    }
-                ))
-                gauge_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font={'color': "#f8fafc"}, height=280)
-                st.plotly_chart(gauge_fig, use_container_width=True)
+4. Data Portability
+Vendor will provide data exports only in Vendor's proprietary format. No migration assistance is included.
+
+5. Audit
+Vendor may audit Customer at any time. Customer has no reciprocal audit right.
+
+6. Liability
+Vendor's liability is limited to one month's fees, except Customer's payment and indemnity obligations, which are unlimited.
+
+7. Disputes
+Disputes will be handled under laws selected by Vendor in a forum selected by Vendor.
+
+8. Business Continuity
+No disaster recovery, business continuity, recovery-time objective, or recovery-point objective is guaranteed.
+""",
+}
+
+
+# --------------------------- Utilities --------------------------
+
+def extract_docx(data: bytes) -> str:
+    """Extract visible paragraph text from DOCX without requiring python-docx."""
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
+    xml = re.sub(r"</w:p>", "\n", xml)
+    xml = re.sub(r"<w:tab[^>]*/>", "\t", xml)
+    xml = re.sub(r"<[^>]+>", "", xml)
+    return html.unescape(xml)
+
+
+def parse_file(uploaded) -> str:
+    name = uploaded.name.lower()
+    data = uploaded.getvalue()
+    if name.endswith(".pdf"):
+        reader = PdfReader(io.BytesIO(data))
+        return "\n".join((page.extract_text() or "") for page in reader.pages)
+    if name.endswith(".txt"):
+        return data.decode("utf-8", errors="ignore")
+    if name.endswith(".docx"):
+        return extract_docx(data)
+    raise ValueError("Unsupported file type")
+
+
+def clean_text(text: str) -> str:
+    text = text.replace("\x00", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def split_text(text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
+    """Legal-friendly recursive-ish splitter: paragraphs -> sentences -> words."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    pieces = []
+    for p in paragraphs:
+        if len(p) <= chunk_size:
+            pieces.append(p)
+            continue
+        sentences = re.split(r"(?<=[.!?])\s+", p)
+        current = ""
+        for sentence in sentences:
+            if len(current) + len(sentence) + 1 <= chunk_size:
+                current = (current + " " + sentence).strip()
             else:
-                st.metric("Composite Risk Score", f"{score}/100")
+                if current:
+                    pieces.append(current)
+                tail = current[-overlap:] if current else ""
+                current = (tail + " " + sentence).strip()
+        if current:
+            pieces.append(current)
 
-        with col_metrics:
-            st.markdown("### Executive Findings")
-            st.markdown(f"> **Assessment:** {results['summary']}")
-            
-            m1, m2, m3 = st.columns(3)
-            crit_count = sum(1 for c in results["categories"].values() for f in c.get("findings", []) if f.get("severity") == "CRITICAL")
-            warn_count = sum(1 for c in results["categories"].values() for f in c.get("findings", []) if f.get("severity") == "WARNING")
-            safe_count = sum(1 for c in results["categories"].values() for f in c.get("findings", []) if f.get("severity") == "LOW RISK")
-            
-            m1.metric("Critical Traps", f"{crit_count}")
-            m2.metric("Warnings", f"{warn_count}")
-            m3.metric("Low Risk Items", f"{safe_count}")
+    # Final safety pass by characters.
+    final = []
+    for piece in pieces:
+        if len(piece) <= chunk_size:
+            final.append(piece)
+        else:
+            start = 0
+            while start < len(piece):
+                end = min(len(piece), start + chunk_size)
+                final.append(piece[start:end])
+                if end == len(piece):
+                    break
+                start = max(start + 1, end - overlap)
+    return final
 
-    with tab2:
-        for cat_name, cat_data in results["categories"].items():
-            st.markdown(f"#### {cat_name} (Risk Score: `{cat_data.get('category_risk_score', 0)}/100`)")
-            for finding in cat_data.get("findings", []):
-                severity = finding.get("severity", "WARNING")
-                with st.expander(f"[{severity}] {finding.get('title', 'Risk Item')}"):
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.markdown("**Original Clause:**")
-                        st.markdown(f'<div class="clause-box-original">{finding.get("original_clause", "N/A")}</div>', unsafe_allow_html=True)
-                        st.markdown("**Exploit Analysis:**")
-                        st.markdown(f'<div class="clause-box-exploit">{finding.get("exploit_analysis", "N/A")}</div>', unsafe_allow_html=True)
-                    with c2:
-                        st.markdown("**Recommended Redline:**")
-                        st.markdown(f'<div class="clause-box-redline">{finding.get("recommended_redline", "N/A")}</div>', unsafe_allow_html=True)
 
-    with tab3:
-        st.markdown("### Ask Questions About This Contract")
-        for msg in st.session_state.chat_history:
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
+def sentence_windows(text: str) -> List[str]:
+    return [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if x.strip()]
 
-        user_input = st.chat_input("Ask a question...")
-        if user_input:
-            st.session_state.chat_history.append({"role": "user", "content": user_input})
-            with st.chat_message("user"):
-                st.write(user_input)
 
-            with st.chat_message("assistant"):
-                if st.session_state.vectorstore and api_key:
-                    bot_response = answer_rag_question(user_input, st.session_state.vectorstore, provider_choice, api_key)
-                else:
-                    bot_response = "Please run the scan first."
-                st.write(bot_response)
-                st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
+def section_name(text: str, fallback: str = "Unnumbered clause") -> str:
+    m = re.search(r"(?i)\b(?:section|clause|article)?\s*([0-9]+(?:\.[0-9]+)*)\b", text[:160])
+    if m:
+        return f"Section {m.group(1)}"
+    m = re.search(r"(?m)^\s*([0-9]+(?:\.[0-9]+)*)[.)]\s+([^\n]+)", text)
+    if m:
+        return f"Section {m.group(1)} — {m.group(2).strip()[:80]}"
+    return fallback
 
-    with tab4:
-        report_md = f"# RED-TEAM AUDIT REPORT\n\nScore: {results['overall_risk_score']}/100\nSummary: {results['summary']}\n\n"
-        for cat_name, cat_data in results["categories"].items():
-            report_md += f"## {cat_name}\n Score: {cat_data.get('category_risk_score', 0)}/100\n"
-            for f in cat_data.get("findings", []):
-                report_md += f"### [{f.get('severity')}] {f.get('title')}\n- Clause: {f.get('original_clause')}\n- Exploit: {f.get('exploit_analysis')}\n- Redline: {f.get('recommended_redline')}\n\n"
-        
-        st.download_button(
-            label="📥 Download Audit Report (.md)",
-            data=report_md,
-            file_name="DocuMind_RedTeam_Report.md",
-            mime="text/markdown"
+
+def quote_from_context(text: str, pattern: str) -> str:
+    for sentence in sentence_windows(text):
+        if re.search(pattern, sentence, flags=re.I):
+            return sentence[:500]
+    return text[:500]
+
+
+# ------------------------- Risk engine --------------------------
+
+def detect_risks(text: str, sensitivity: int = 55) -> List[Risk]:
+    risks: List[Risk] = []
+
+    def add(severity, category, title, pattern, explanation, recommendation, confidence=90):
+        quote = quote_from_context(text, pattern)
+        risks.append(
+            Risk(
+                severity=severity,
+                category=category,
+                title=title,
+                clause=quote,
+                explanation=explanation,
+                recommendation=recommendation,
+                section=section_name(quote),
+                confidence=confidence,
+            )
         )
+
+    # 1) Liability poison pills
+    if re.search(r"indemnif\w*.*(all|any).*(loss|damage|claim|cost|expense)|without limitation|unlimited indemn", text, re.I | re.S):
+        add(
+            "Critical", "Liability Poison Pill",
+            "Uncapped indemnification exposure",
+            r"indemnif\w*|without limitation|unlimited",
+            "The clause can shift an open-ended financial risk to one party. A broad indemnity without a cap, exclusions, procedure, or causation standard can become a material balance-sheet liability.",
+            "Add a liability cap, mutual indemnity structure, third-party claim procedure, causation threshold, exclusions for the indemnitee's negligence, and a duty to mitigate.",
+        )
+
+    if re.search(r"(may|can).{0,40}(terminate|suspend).{0,80}(any time|at any time|for any reason|without notice|immediately)", text, re.I | re.S):
+        add(
+            "Critical", "Liability Poison Pill",
+            "Unilateral termination / suspension power",
+            r"(terminate|suspend).{0,100}(any time|for any reason|without notice|immediately)",
+            "One-sided exit or suspension rights can let a counterparty disrupt operations before the affected party can cure a breach or transition services.",
+            "Require material breach, written notice, a reasonable cure period, emergency exceptions, transition assistance, and refund/credit treatment where appropriate.",
+        )
+
+    if re.search(r"(binding arbitration|arbitration).{0,150}(location|forum|selected).{0,80}(party|provider|disclosing|vendor)", text, re.I | re.S):
+        add(
+            "Critical", "Liability Poison Pill",
+            "Forum-controlled arbitration",
+            r"(binding arbitration|arbitration).{0,150}(location|forum|selected)",
+            "A dispute clause that lets one side select the venue can increase procedural cost and create a home-court advantage.",
+            "Specify a neutral venue, governing law, allocation of fees, procedural rules, and a mutually agreed arbitrator-selection mechanism.",
+        )
+
+    if re.search(r"(all|any).{0,70}(ideas|feedback|inventions|improvements|derivative works).{0,100}(belong|owned|assign)", text, re.I | re.S):
+        add(
+            "Critical", "Liability Poison Pill",
+            "Broad IP transfer trap",
+            r"(ideas|feedback|inventions|improvements|derivative works).{0,100}(belong|owned|assign)",
+            "The language may capture pre-existing IP, independently developed materials, feedback, or generalized know-how beyond the intended transaction.",
+            "Carve out background IP and independently developed materials; define deliverables precisely; grant only the minimum license or assignment necessary.",
+        )
+
+    # 2) Missing safeguards
+    if not re.search(r"force majeure|act of god|disaster|unforeseeable", text, re.I):
+        add(
+            "Medium", "Missing Essential Safeguard",
+            "Force majeure protection is missing",
+            r"force majeure|act of god|disaster",
+            "The agreement does not appear to allocate risk for qualifying events outside a party's reasonable control.",
+            "Add a force majeure clause covering qualifying events, notice, mitigation, suspension mechanics, and termination after a defined prolonged period.",
+            confidence=96,
+        )
+
+    if not re.search(r"privacy|personal data|personal information|gdpr|data protection|data processing", text, re.I):
+        add(
+            "Medium", "Missing Essential Safeguard",
+            "Data privacy protections are missing",
+            r"privacy|personal data|personal information|gdpr|data protection",
+            "No clear data-protection framework was detected. That can leave roles, processing purposes, security, retention, and incident obligations undefined.",
+            "Add data roles, permitted processing, security controls, subprocessors, retention/deletion, data-subject rights, cross-border transfer terms, and incident notification.",
+            confidence=97,
+        )
+    elif not re.search(r"breach.{0,100}(notice|notification)|incident.{0,100}(notice|notification)|notify.{0,60}(breach|incident)", text, re.I | re.S):
+        add(
+            "Medium", "Missing Essential Safeguard",
+            "Security incident notification is unclear",
+            r"breach|incident|security",
+            "Privacy language exists, but a concrete security-incident notification commitment was not detected.",
+            "Define a notification deadline, escalation contact, minimum incident details, cooperation obligations, and update cadence.",
+            confidence=82,
+        )
+
+    if not re.search(r"cure period|cure.{0,50}(days|day)|remedy.{0,50}(days|day)|written notice.{0,100}(days|day)", text, re.I | re.S):
+        add(
+            "Medium", "Missing Essential Safeguard",
+            "Cure period is missing",
+            r"cure|remedy|written notice",
+            "A breach may trigger remedies without a defined opportunity to cure. This increases the risk of abrupt termination, suspension, or litigation.",
+            "Add written notice and a commercially reasonable cure period, with a shorter emergency window for urgent security or confidentiality breaches.",
+            confidence=94,
+        )
+
+    # 3) Compliance / regulatory gaps
+    if re.search(r"(OWASP|API|application|software|SaaS|platform|security)", text, re.I) and not re.search(
+        r"security.{0,100}(standard|control|testing)|penetration test|vulnerability|OWASP|encryption|access control",
+        text, re.I | re.S
+    ):
+        add(
+            "Medium", "Regulatory & Compliance Gap",
+            "Technical security controls are not measurable",
+            r"security|software|SaaS|platform",
+            "The document references a technology service but does not appear to bind the provider to concrete security controls or verification rights.",
+            "Reference measurable security requirements such as encryption, least privilege, logging, vulnerability management, independent assessments, and remediation SLAs.",
+            confidence=79,
+        )
+
+    if re.search(r"customer data|personal data|personal information|data", text, re.I) and not re.search(
+        r"retain|retention|delete|deletion|return.{0,40}data|return.{0,40}information",
+        text, re.I | re.S
+    ):
+        add(
+            "Low", "Regulatory & Compliance Gap",
+            "Data lifecycle is undefined",
+            r"data|information",
+            "The contract discusses data but does not clearly define retention, deletion, or return mechanics.",
+            "Specify retention periods, deletion/return at termination, backup treatment, legal-retention exceptions, and certification where appropriate.",
+            confidence=78,
+        )
+
+    if not re.search(r"notice|written notice|notices", text, re.I):
+        add(
+            "Low", "Regulatory & Compliance Gap",
+            "Formal notice mechanics are missing",
+            r"notice|notices",
+            "A dispute or breach process can become ambiguous when the agreement does not specify how formal notices must be delivered.",
+            "Define permitted delivery methods, notice addresses, effective timing, and contact-update mechanics.",
+            confidence=91,
+        )
+
+    # Sensitivity: lower threshold means surface more pattern variants.
+    if sensitivity < 45 and re.search(r"(automatic|renew|renewal).{0,80}(term|year)", text, re.I | re.S):
+        add(
+            "Low", "Regulatory & Compliance Gap",
+            "Auto-renewal deserves review",
+            r"automatic|renew|renewal",
+            "Automatic renewal can become a lock-in mechanism when notice windows are long or reminders are absent.",
+            "Use a reasonable renewal notice window and require transparent renewal pricing and reminder notices.",
+            confidence=73,
+        )
+
+    # De-duplicate by title.
+    unique = {}
+    for r in risks:
+        unique[(r.category, r.title)] = r
+    risks = list(unique.values())
+
+    sev_order = {"Critical": 0, "Medium": 1, "Low": 2, "Safe": 3}
+    return sorted(risks, key=lambda x: (sev_order[x.severity], -x.confidence))
+
+
+# ---------------------- Local FAISS RAG --------------------------
+
+@st.cache_resource(show_spinner=False)
+def load_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+
+@st.cache_resource(show_spinner=False)
+def build_faiss(chunks: Tuple[str, ...]):
+    model = load_embedder()
+    vectors = model.encode(
+        list(chunks),
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    vectors = np.asarray(vectors, dtype="float32")
+    index = faiss.IndexFlatIP(vectors.shape[1])
+    index.add(vectors)
+    return index, vectors
+
+
+def retrieve(query: str, chunks: List[str], k: int = 4) -> List[Tuple[str, float]]:
+    if not chunks:
+        return []
+    index, _ = build_faiss(tuple(chunks))
+    model = load_embedder()
+    q = model.encode([query], normalize_embeddings=True, show_progress_bar=False)
+    scores, ids = index.search(np.asarray(q, dtype="float32"), min(k, len(chunks)))
+    return [(chunks[int(i)], float(s)) for i, s in zip(ids[0], scores[0]) if i >= 0]
+
+
+def deterministic_adversarial_answer(query: str, contexts: List[Tuple[str, float]], risks: List[Risk]) -> str:
+    q = query.lower()
+    matched = []
+
+    for risk in risks:
+        terms = re.findall(r"[a-zA-Z]{5,}", risk.title.lower())
+        overlap = sum(1 for t in terms if t in q)
+        if overlap:
+            matched.append((overlap, risk))
+
+    matched.sort(key=lambda x: -x[0])
+
+    lines = [
+        "### Red-Team Assessment",
+        "",
+        "I am treating the prompt as an adversarial contract test, not as legal advice.",
+    ]
+
+    if matched:
+        risk = matched[0][1]
+        lines += [
+            "",
+            f"**Most relevant finding:** {risk.title} — **{risk.severity}**",
+            f"> {risk.clause}",
+            "",
+            f"**Attack surface:** {risk.explanation}",
+            "",
+            f"**Defensive fix:** {risk.recommendation}",
+            "",
+            f"**Citation:** {risk.section}",
+        ]
+    elif contexts:
+        best = contexts[0][0]
+        lines += [
+            "",
+            "**Relevant retrieved context:**",
+            f"> {best[:900]}",
+            "",
+            "The local RAG index found the above clause context. A real red-team review should map the scenario to definitions, exceptions, remedies, and termination mechanics elsewhere in the agreement.",
+        ]
+    else:
+        lines += ["", "No relevant document context was available."]
+
+    if any(x in q for x in ["hidden fee", "charge", "pricing", "fee"]):
+        lines += [
+            "",
+            "**Fee-abuse test:** check whether the agreement allows new fees by unilateral notice, incorporates external pricing pages, or makes continued use equal acceptance.",
+        ]
+    if any(x in q for x in ["terminate", "termination", "suspend"]):
+        lines += [
+            "",
+            "**Exit-abuse test:** check who controls termination, whether notice is required, whether there is a cure period, and what happens to prepaid amounts and customer data.",
+        ]
+    if any(x in q for x in ["data", "privacy", "gdpr", "breach"]):
+        lines += [
+            "",
+            "**Data-abuse test:** check purpose limitation, subprocessors, security controls, incident notice, retention/deletion, and cross-border transfer language.",
+        ]
+
+    return "\n".join(lines)
+
+
+# ----------------------- Scoring / exports ----------------------
+
+def calculate_scores(risks: List[Risk], text: str) -> Dict[str, int]:
+    critical = sum(r.severity == "Critical" for r in risks)
+    medium = sum(r.severity == "Medium" for r in risks)
+    low = sum(r.severity == "Low" for r in risks)
+
+    risk_score = min(100, critical * 24 + medium * 11 + low * 4)
+    # Penalize documents with no risk findings less aggressively.
+    if len(text) < 250:
+        risk_score = min(100, risk_score + 10)
+
+    safeguard_terms = ["force majeure", "privacy", "data", "cure", "termination", "liability", "notice"]
+    present = sum(bool(re.search(term, text, re.I)) for term in safeguard_terms)
+    enforceability = max(0, min(100, 45 + present * 8 - critical * 7 - medium * 3))
+    enforceability = int(enforceability)
+
+    return {
+        "risk": int(risk_score),
+        "enforceability": enforceability,
+        "red_flags": critical + medium,
+        "missing_safeguards": sum("Missing Essential Safeguard" in r.category for r in risks),
+    }
+
+
+def build_report(doc_name: str, text: str, risks: List[Risk], scores: Dict[str, int]) -> str:
+    lines = [
+        "# 🛡️ DocuMind Red-Teamer — Executive Audit Report",
+        "",
+        f"**Document:** {doc_name}",
+        f"**Risk Score:** {scores['risk']}/100",
+        f"**Enforceability Score:** {scores['enforceability']}/100",
+        f"**Red Flags:** {scores['red_flags']}",
+        f"**Missing Safeguards:** {scores['missing_safeguards']}",
+        "",
+        "> Automated red-team screening. Not legal advice. Findings require review by qualified counsel.",
+        "",
+        "## Executive Summary",
+        "",
+        "DocuMind Red-Teamer adversarially screened the document for liability poison pills, missing safeguards, compliance gaps, and exploitable contract mechanics.",
+        "",
+        "## Findings",
+        "",
+    ]
+    for i, r in enumerate(risks, 1):
+        lines += [
+            f"### {i}. [{r.severity}] {r.title}",
+            f"**Category:** {r.category}",
+            f"**Section:** {r.section}",
+            "",
+            f"**Clause:** {r.clause}",
+            "",
+            f"**Threat:** {r.explanation}",
+            "",
+            f"**Recommended counter-clause:** {r.recommendation}",
+            "",
+        ]
+    lines += [
+        "## Top Red-Team Questions",
+        "",
+        "- Can the counterparty change price, scope, or service terms unilaterally?",
+        "- Can the counterparty terminate or suspend without notice or cure?",
+        "- Are indemnities and liability exceptions capped and reciprocal?",
+        "- Who owns background IP, feedback, improvements, and independently developed work?",
+        "- What happens to data, access, and prepaid fees after termination?",
+        "",
+        "## Document Snapshot",
+        "",
+        f"- Characters analyzed: {len(text):,}",
+        f"- Risk findings: {len(risks)}",
+        "- Retrieval: local FAISS semantic index",
+        "- Embedding model: sentence-transformers / all-MiniLM-L6-v2",
+    ]
+    return "\n".join(lines)
+
+
+def simple_pdf_bytes(report: str) -> bytes:
+    """Create a dependency-light PDF with reportlab when available."""
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib import colors
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=LETTER,
+        rightMargin=42,
+        leftMargin=42,
+        topMargin=42,
+        bottomMargin=42,
+        title="DocuMind Red-Teamer Executive Audit",
+    )
+    styles = getSampleStyleSheet()
+    styles["Title"].textColor = colors.HexColor("#0d1117")
+    styles["Heading2"].textColor = colors.HexColor("#8A2BE2")
+    story = []
+    for block in report.split("\n\n"):
+        if block.startswith("# "):
+            story.append(Paragraph(html.escape(block[2:]), styles["Title"]))
+        elif block.startswith("## "):
+            story.append(Paragraph(html.escape(block[3:]), styles["Heading2"]))
+        elif block.startswith("### "):
+            story.append(Paragraph(html.escape(block[4:]), styles["Heading3"]))
+        else:
+            safe = html.escape(block).replace("\n", "<br/>")
+            story.append(Paragraph(safe, styles["BodyText"]))
+        story.append(Spacer(1, 8))
+    doc.build(story)
+    return buffer.getvalue()
+
+
+# -------------------------- Session state -----------------------
+
+if "doc_text" not in st.session_state:
+    st.session_state.doc_text = ""
+if "doc_name" not in st.session_state:
+    st.session_state.doc_name = ""
+if "chat" not in st.session_state:
+    st.session_state.chat = []
+if "sample_loaded" not in st.session_state:
+    st.session_state.sample_loaded = False
+
+
+# ------------------------------ Header --------------------------
+
+st.markdown(
+    """
+<div class="hero">
+  <h1>🛡️ DocuMind Red-Teamer</h1>
+  <p>Red-teaming legal contracts before your opponent does.</p>
+  <span class="badge">● LOCAL RAG ONLINE &nbsp; • &nbsp; FAISS INDEX READY &nbsp; • &nbsp; SECURITY-FIRST MODE</span>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# ----------------------------- Sidebar --------------------------
+
+with st.sidebar:
+    st.markdown("## ⚙️ Red-Team Console")
+    st.caption("Upload a contract or launch a vulnerable sample in one click.")
+
+    uploaded = st.file_uploader(
+        "Contract / policy",
+        type=["pdf", "txt", "docx"],
+        help="Supported: PDF, TXT and DOCX.",
+    )
+
+    st.markdown("### ⚡ One-click attack targets")
+    for sample_name in SAMPLES:
+        if st.button(sample_name, use_container_width=True, key=f"sample_{sample_name}"):
+            st.session_state.doc_text = clean_text(SAMPLES[sample_name])
+            st.session_state.doc_name = sample_name
+            st.session_state.sample_loaded = True
+            st.session_state.chat = []
+            st.rerun()
+
+    if uploaded is not None:
+        try:
+            parsed = clean_text(parse_file(uploaded))
+            st.session_state.doc_text = parsed
+            st.session_state.doc_name = uploaded.name
+            st.session_state.sample_loaded = False
+            st.session_state.chat = []
+        except Exception as exc:
+            st.error(f"Could not parse document: {exc}")
+
+    st.markdown("---")
+    st.markdown("### 🎚️ Scan controls")
+    sensitivity = st.slider(
+        "Risk sensitivity",
+        min_value=20,
+        max_value=90,
+        value=55,
+        step=5,
+        help="Higher values prioritize stronger signals; lower values surface more exploratory findings.",
+    )
+
+    categories = st.multiselect(
+        "Threat categories",
+        [
+            "Liability Poison Pill",
+            "Missing Essential Safeguard",
+            "Regulatory & Compliance Gap",
+        ],
+        default=[
+            "Liability Poison Pill",
+            "Missing Essential Safeguard",
+            "Regulatory & Compliance Gap",
+        ],
+    )
+
+    st.markdown("---")
+    st.markdown(
+        '<div class="small-muted">⚠️ Automated screening only. This prototype does not provide legal advice or replace counsel.</div>',
+        unsafe_allow_html=True,
+    )
+
+# -------------------------- Empty state -------------------------
+
+if not st.session_state.doc_text:
+    st.markdown(
+        """
+<div class="glass">
+  <div class="section-title">🚀 Launch an adversarial audit</div>
+  <p style="color:#AAB5C4">
+    Upload a PDF/TXT/DOCX or choose a pre-built vulnerable contract from the sidebar.
+    The local engine extracts clauses, creates 800-character chunks with 100-character overlap,
+    indexes them in FAISS, and runs deterministic legal red-team detectors.
+  </p>
+  <div class="warning-box">Judge demo tip: start with <b>Exploitative NDA</b> for an instant visible threat scorecard.</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
+# ------------------------- Run analysis -------------------------
+
+with st.spinner("Building local FAISS context + running red-team detectors..."):
+    chunks = split_text(st.session_state.doc_text, 800, 100)
+    all_risks = detect_risks(st.session_state.doc_text, sensitivity)
+    risks = [r for r in all_risks if r.category in categories]
+    scores = calculate_scores(risks, st.session_state.doc_text)
+
+# Build FAISS lazily but show status.
+try:
+    _ = build_faiss(tuple(chunks))
+    rag_status = "FAISS ONLINE"
+except Exception as exc:
+    rag_status = f"FAISS ERROR: {str(exc)[:45]}"
+
+st.markdown(
+    f'<div class="glass" style="margin-bottom:14px"><b>📄 {html.escape(st.session_state.doc_name)}</b>'
+    f' &nbsp; <span class="small-muted">• {len(st.session_state.doc_text):,} chars • {len(chunks)} legal chunks • {rag_status}</span></div>',
+    unsafe_allow_html=True,
+)
+
+# ------------------------------- Tabs ---------------------------
+
+tab1, tab2, tab3, tab4 = st.tabs(
+    [
+        "📊 Executive Audit Dashboard",
+        "🔍 Vulnerability Matrix & Context",
+        "⚔️ Adversarial Simulator",
+        "📜 Raw Document & Vector Chunks",
+    ]
+)
+
+# ============================ TAB 1 =============================
+
+with tab1:
+    st.markdown('<div class="section-title">Executive Threat Scorecard</div>', unsafe_allow_html=True)
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    risk_color = "#00E676" if scores["risk"] < 30 else "#FF9F1C" if scores["risk"] < 65 else "#FF4B4B"
+    enforce_color = "#FF4B4B" if scores["enforceability"] < 45 else "#FF9F1C" if scores["enforceability"] < 70 else "#00E676"
+
+    with c1:
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Threat Score</div>'
+            f'<div class="metric-value" style="color:{risk_color}">{scores["risk"]}/100</div>'
+            f'<div class="metric-sub">Higher = more exploitable</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Red Flags</div>'
+            f'<div class="metric-value" style="color:#FF4B4B">{scores["red_flags"]}</div>'
+            f'<div class="metric-sub">Critical + medium findings</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Missing Safeguards</div>'
+            f'<div class="metric-value" style="color:#FF9F1C">{scores["missing_safeguards"]}</div>'
+            f'<div class="metric-sub">Protection gaps detected</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Enforceability</div>'
+            f'<div class="metric-value" style="color:{enforce_color}">{scores["enforceability"]}/100</div>'
+            f'<div class="metric-sub">Heuristic contract health</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.write("")
+    left, right = st.columns([1.15, 1])
+
+    with left:
+        fig = px.pie(
+            pd.DataFrame(
+                {
+                    "Severity": ["Critical", "Medium", "Low"],
+                    "Count": [
+                        sum(r.severity == "Critical" for r in risks),
+                        sum(r.severity == "Medium" for r in risks),
+                        sum(r.severity == "Low" for r in risks),
+                    ],
+                }
+            ),
+            names="Severity",
+            values="Count",
+            hole=0.58,
+            title="Severity Breakdown",
+        )
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font_color="#DDE5EF",
+            legend_title="",
+            margin=dict(l=10, r=10, t=55, b=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with right:
+        st.markdown('<div class="glass"><div class="section-title">🎯 Top deal-breakers</div>', unsafe_allow_html=True)
+        if risks:
+            for r in risks[:3]:
+                cls = r.severity.lower()
+                st.markdown(
+                    f'<div class="risk-card {cls}"><span class="severity {cls}">{r.severity.upper()}</span>'
+                    f'<b style="margin-left:8px">{html.escape(r.title)}</b>'
+                    f'<div class="small-muted" style="margin-top:7px">{html.escape(r.explanation[:230])}...</div></div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.success("No selected-category vulnerabilities were detected.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("### 🔥 Recommended first moves")
+    recs = []
+    for r in risks[:5]:
+        recs.append(f"**{r.title}:** {r.recommendation}")
+    if recs:
+        for rec in recs:
+            st.markdown(f"- {rec}")
+    else:
+        st.info("No recommendations generated for the selected categories.")
+
+    report = build_report(st.session_state.doc_name, st.session_state.doc_text, risks, scores)
+    pdf = simple_pdf_bytes(report)
+    d1, d2 = st.columns(2)
+    with d1:
+        st.download_button(
+            "⬇️ Download Executive Markdown",
+            data=report,
+            file_name="documind_executive_audit.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    with d2:
+        st.download_button(
+            "⬇️ Download Executive PDF",
+            data=pdf,
+            file_name="documind_executive_audit.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+# ============================ TAB 2 =============================
+
+with tab2:
+    st.markdown('<div class="section-title">Vulnerability Matrix</div>', unsafe_allow_html=True)
+
+    if not risks:
+        st.success("No findings match the current filters.")
+    else:
+        for i, r in enumerate(risks, 1):
+            cls = r.severity.lower()
+            with st.expander(f"{r.severity}  •  {r.category}  •  {r.title}", expanded=(i <= 2)):
+                st.markdown(
+                    f'<div class="risk-card {cls}"><span class="severity {cls}">{r.severity.upper()}</span>'
+                    f'<span class="small-muted" style="margin-left:8px">Confidence {r.confidence}%</span></div>',
+                    unsafe_allow_html=True,
+                )
+                a, b = st.columns(2)
+                with a:
+                    st.markdown("**📌 Exact clause / context**")
+                    st.code(r.clause, language="text")
+                    st.markdown(f"**Section:** `{r.section}`")
+                with b:
+                    st.markdown("**⚔️ Why an adversary cares**")
+                    st.write(r.explanation)
+                    st.markdown("**🛡️ Recommended counter-clause / redline direction**")
+                    st.success(r.recommendation)
+
+# ============================ TAB 3 =============================
+
+with tab3:
+    st.markdown('<div class="section-title">Adversarial Scenario Simulator</div>', unsafe_allow_html=True)
+    st.caption("Ask how a clause could be abused. Responses are grounded in the local FAISS retrieval index and detected findings.")
+
+    quick_prompts = [
+        "How could a vendor exploit the contract to charge hidden fees?",
+        "How could the counterparty terminate or suspend service unfairly?",
+        "What is the biggest IP ownership trap?",
+        "How could a data breach become a liability gap?",
+    ]
+
+    qcols = st.columns(4)
+    for idx, prompt in enumerate(quick_prompts):
+        with qcols[idx]:
+            if st.button(prompt, key=f"qp_{idx}", use_container_width=True):
+                st.session_state.chat.append(("user", prompt))
+                contexts = retrieve(prompt, chunks, 4)
+                answer = deterministic_adversarial_answer(prompt, contexts, risks)
+                st.session_state.chat.append(("assistant", answer))
+                st.rerun()
+
+    for role, message in st.session_state.chat:
+        with st.chat_message(role):
+            st.markdown(message)
+
+    prompt = st.chat_input("e.g. How can a vendor exploit Section 4 to charge hidden fees?")
+    if prompt:
+        st.session_state.chat.append(("user", prompt))
+        with st.spinner("Retrieving adversarial context..."):
+            contexts = retrieve(prompt, chunks, 4)
+            answer = deterministic_adversarial_answer(prompt, contexts, risks)
+        st.session_state.chat.append(("assistant", answer))
+        st.rerun()
+
+# ============================ TAB 4 =============================
+
+with tab4:
+    st.markdown('<div class="section-title">Transparency Layer</div>', unsafe_allow_html=True)
+    st.caption("Judge/debug mode: inspect extracted text and the exact semantic chunks indexed by FAISS.")
+
+    r1, r2 = st.columns(2)
+    with r1:
+        st.markdown("**📜 Extracted document text**")
+        st.text_area(
+            "raw",
+            st.session_state.doc_text,
+            height=520,
+            label_visibility="collapsed",
+        )
+    with r2:
+        st.markdown(f"**🧩 Vector chunks ({len(chunks)})**")
+        for i, chunk in enumerate(chunks):
+            with st.expander(f"Chunk {i+1}", expanded=False):
+                st.code(chunk, language="text")
+
+    st.markdown("---")
+    st.markdown("**Engine metadata**")
+    metadata = {
+        "document": st.session_state.doc_name,
+        "chunk_size": 800,
+        "chunk_overlap": 100,
+        "vector_index": "FAISS IndexFlatIP",
+        "embedding_model": "all-MiniLM-L6-v2",
+        "risk_modules": [
+            "Liability Poison Pills",
+            "Missing Essential Safeguards",
+            "Regulatory & Compliance Gaps",
+            "Adversarial Scenario Simulator",
+        ],
+    }
+    st.json(metadata)
