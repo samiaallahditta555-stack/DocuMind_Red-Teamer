@@ -11,8 +11,10 @@ from typing import List, Dict, Tuple
 import numpy as np
 
 import streamlit as st
-from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
 
 
 # ============================================================
@@ -323,6 +325,8 @@ def parse_file(uploaded) -> str:
     name = uploaded.name.lower()
     data = uploaded.getvalue()
     if name.endswith(".pdf"):
+        if PdfReader is None:
+            raise ValueError("PDF support is unavailable because pypdf is not installed. Please redeploy with the included requirements.txt.")
         reader = PdfReader(io.BytesIO(data))
         return "\n".join((page.extract_text() or "") for page in reader.pages)
     if name.endswith(".txt"):
@@ -552,37 +556,36 @@ def detect_risks(text: str, sensitivity: int = 55) -> List[Risk]:
     return sorted(risks, key=lambda x: (sev_order[x.severity], -x.confidence))
 
 
-# ---------------------- Local FAISS RAG --------------------------
+# ---------------------- Local NumPy RAG --------------------------
 
-@st.cache_resource(show_spinner=False)
-def load_embedder():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+def _hash_vector(text: str, dim: int = 768) -> np.ndarray:
+    """Create a deterministic lightweight text vector without ML packages."""
+    vec = np.zeros(dim, dtype=np.float32)
+    tokens = re.findall(r"[a-z0-9]{2,}", text.lower())
+    if not tokens:
+        return vec
+    for token in tokens:
+        idx = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16) % dim
+        vec[idx] += 1.0
+    norm = np.linalg.norm(vec)
+    if norm:
+        vec /= norm
+    return vec
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def build_vector_store(chunks: Tuple[str, ...]):
-    """Build a local semantic vector store using NumPy only."""
-    model = load_embedder()
-    vectors = model.encode(
-        list(chunks),
-        normalize_embeddings=True,
-        show_progress_bar=False,
-    )
-    vectors = np.asarray(vectors, dtype="float32")
-    return vectors
+    """Build a dependency-light local vector store using only NumPy."""
+    return np.vstack([_hash_vector(chunk) for chunk in chunks]) if chunks else np.empty((0, 768), dtype=np.float32)
 
 
 def retrieve(query: str, chunks: List[str], k: int = 4) -> List[Tuple[str, float]]:
     if not chunks:
         return []
-
     vectors = build_vector_store(tuple(chunks))
-    model = load_embedder()
-    q = model.encode([query], normalize_embeddings=True, show_progress_bar=False)
-    q = np.asarray(q, dtype="float32")[0]
-
-    limit = min(k, len(chunks))
+    q = _hash_vector(query)
     scores = vectors @ q
+    limit = min(k, len(chunks))
     ids = np.argsort(scores)[::-1][:limit]
     return [(chunks[int(i)], float(scores[int(i)])) for i in ids]
 
@@ -858,7 +861,7 @@ if not st.session_state.doc_text:
   <p style="color:#AAB5C4">
     Upload a PDF/TXT/DOCX or choose a pre-built vulnerable contract from the sidebar.
     The local engine extracts clauses, creates 800-character chunks with 100-character overlap,
-    indexes them in FAISS, and runs deterministic legal red-team detectors.
+    indexes them in a lightweight local NumPy vector store, and runs deterministic legal red-team detectors.
   </p>
   <div class="warning-box">Judge demo tip: start with <b>Exploitative NDA</b> for an instant visible threat scorecard.</div>
 </div>
@@ -869,7 +872,7 @@ if not st.session_state.doc_text:
 
 # ------------------------- Run analysis -------------------------
 
-with st.spinner("Building local FAISS context + running red-team detectors..."):
+with st.spinner("Building local vector context + running red-team detectors..."):
     chunks = split_text(st.session_state.doc_text, 800, 100)
     all_risks = detect_risks(st.session_state.doc_text, sensitivity)
     risks = [r for r in all_risks if r.category in categories]
@@ -878,9 +881,9 @@ with st.spinner("Building local FAISS context + running red-team detectors..."):
 # Build FAISS lazily but show status.
 try:
     _ = build_vector_store(tuple(chunks))
-    rag_status = "FAISS ONLINE"
+    rag_status = "LOCAL VECTOR ONLINE"
 except Exception as exc:
-    rag_status = f"FAISS ERROR: {str(exc)[:45]}"
+    rag_status = f"VECTOR ERROR: {str(exc)[:45]}"
 
 st.markdown(
     f'<div class="glass" style="margin-bottom:14px"><b>📄 {html.escape(st.session_state.doc_name)}</b>'
@@ -1107,8 +1110,8 @@ with tab4:
         "document": st.session_state.doc_name,
         "chunk_size": 800,
         "chunk_overlap": 100,
-        "vector_index": "FAISS IndexFlatIP",
-        "embedding_model": "all-MiniLM-L6-v2",
+        "vector_index": "NumPy hashed-vector cosine retrieval",
+        "embedding_model": "None (dependency-light local retrieval)",
         "risk_modules": [
             "Liability Poison Pills",
             "Missing Essential Safeguards",
