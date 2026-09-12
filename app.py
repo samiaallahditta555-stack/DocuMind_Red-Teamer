@@ -1,28 +1,9 @@
-import io
-import re
-import html
-import json
-import textwrap
-import hashlib
-import zipfile
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Tuple
-
-import numpy as np
-
 import streamlit as st
-try:
-    from pypdf import PdfReader
-except ImportError:
-    PdfReader = None
+import time
 
-
-# ============================================================
-# DocuMind Red-Teamer
-# Local-first legal-contract red-team dashboard.
-# No paid API or external LLM is required.
-# ============================================================
-
+# ----------------------------------------------------------------------------
+# PAGE CONFIG
+# ----------------------------------------------------------------------------
 st.set_page_config(
     page_title="DocuMind Red-Teamer",
     page_icon="🛡️",
@@ -30,1093 +11,434 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ----------------------------- CSS -----------------------------
+if "active_page" not in st.session_state:
+    st.session_state.active_page = "Home"
 
+NAV_ITEMS = [
+    ("Home", "fa-house"),
+    ("Upload Contract", "fa-file-lines"),
+    ("Scan & Analyze", "fa-magnifying-glass"),
+    ("Risks Found", "fa-triangle-exclamation"),
+    ("History", "fa-clock-rotate-left"),
+]
+
+# ----------------------------------------------------------------------------
+# FONT AWESOME + GLOBAL CSS
+# ----------------------------------------------------------------------------
 st.markdown(
     """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap');
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        html, body, [data-testid="stAppViewContainer"] {
+            background-color: #060a17;
+            color: #e6ecff;
+            font-family: 'Segoe UI', Arial, sans-serif;
+        }
+        [data-testid="stHeader"] { background: rgba(0,0,0,0); }
+        .block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1440px; }
 
-:root {
-    --bg: #0d1117;
-    --panel: rgba(255,255,255,.035);
-    --border: rgba(255,255,255,.10);
-    --crimson: #FF4B4B;
-    --amber: #FF9F1C;
-    --green: #00E676;
-    --cyan: #00B4D8;
-    --purple: #9B5DE5;
-    --text: #F5F7FA;
-    --muted: #9CA8B8;
-}
+        /* ---------- Sidebar ---------- */
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #0a0f24 0%, #070b1a 100%);
+            border-right: 1px solid rgba(90,110,255,0.15);
+        }
+        [data-testid="stSidebar"] .block-container { padding-top: 1.2rem; }
 
-.stApp {
-    background:
-      radial-gradient(circle at 8% 5%, rgba(255,75,75,.12), transparent 25%),
-      radial-gradient(circle at 90% 12%, rgba(0,180,216,.11), transparent 26%),
-      radial-gradient(circle at 70% 85%, rgba(155,93,229,.12), transparent 30%),
-      linear-gradient(135deg, #0d1117 0%, #161b22 50%, #1a102f 100%);
-    color: var(--text);
-    font-family: 'Inter', sans-serif;
-}
+        .brand-wrap { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+        .brand-icon {
+            width: 46px; height: 46px; border-radius: 12px;
+            background: linear-gradient(135deg, #7b5cff, #3aa6ff);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px; color: white;
+            box-shadow: 0 0 18px rgba(90,140,255,0.45);
+        }
+        .brand-title { font-size: 21px; font-weight: 800; color: #ffffff; line-height: 1.15; }
+        .brand-title span {
+            display: block;
+            background: linear-gradient(90deg, #7b8cff, #b28bff);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            font-weight: 800;
+        }
+        .brand-subtitle { color: #93a1c9; font-size: 13px; margin: 12px 0 24px 0; line-height: 1.45; }
 
-section[data-testid="stSidebar"] {
-    background: rgba(22, 27, 34, 0.80);
-    border-right: 1px solid rgba(255,255,255,.08);
-    position: relative;
-}
-section[data-testid="stSidebar"]::after {
-    content: "";
-    position: absolute;
-    top: 0; bottom: 0; right: -2px; width: 2px;
-    background: linear-gradient(180deg, #FF4B4B, #FF9F1C, #00B4D8, #9B5DE5);
-    box-shadow: 0 0 18px rgba(0,180,216,.55);
-}
+        div[data-testid="stSidebar"] button {
+            width: 100%; text-align: left !important; border-radius: 10px !important;
+            border: 1px solid transparent !important; background: transparent !important;
+            color: #b7c2e6 !important; font-size: 15px !important;
+            padding: 11px 14px !important; margin-bottom: 5px !important;
+            transition: all 0.15s ease-in-out;
+        }
+        div[data-testid="stSidebar"] button:hover {
+            background: rgba(90,110,255,0.12) !important;
+            border-color: rgba(90,110,255,0.25) !important; color: #ffffff !important;
+        }
+        div[data-testid="stSidebar"] button:focus { box-shadow: none !important; }
 
-.hero {
-    padding: 26px 30px;
-    border-radius: 24px;
-    margin-bottom: 18px;
-    background:
-      linear-gradient(135deg, rgba(255,75,75,.13), rgba(0,180,216,.08) 45%, rgba(155,93,229,.13));
-    border: 1px solid rgba(255,255,255,.12);
-    box-shadow: 0 18px 60px rgba(0,0,0,.28);
-    backdrop-filter: blur(12px);
-}
-.hero h1 {
-    margin: 0;
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 42px;
-    letter-spacing: -1.5px;
-}
-.hero p {
-    color: #C8D1DC;
-    margin: 7px 0 0;
-    font-size: 16px;
-}
-.badge {
-    display: inline-block;
-    margin-top: 15px;
-    padding: 7px 12px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 800;
-    letter-spacing: .3px;
-    background: rgba(0,180,216,.10);
-    border: 1px solid rgba(0,180,216,.35);
-    color: #7BE8FF;
-    box-shadow: 0 0 18px rgba(0,180,216,.13);
-}
+        .nav-active-tag {
+            margin-top: -9px; margin-bottom: 7px; font-size: 11px;
+            color: #7b93ff; padding-left: 8px;
+        }
 
-.glass {
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.10);
-    border-radius: 18px;
-    padding: 18px;
-    backdrop-filter: blur(10px);
-    box-shadow: 0 12px 40px rgba(0,0,0,.18);
-}
-.metric-card {
-    background: rgba(255,255,255,0.035);
-    border: 1px solid rgba(255,255,255,.10);
-    border-radius: 18px;
-    padding: 18px 20px;
-    min-height: 112px;
-}
-.metric-label {
-    color: #9CA8B8;
-    font-size: 12px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-}
-.metric-value {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 32px;
-    font-weight: 800;
-    margin-top: 5px;
-}
-.metric-sub {
-    color: #8995A5;
-    font-size: 12px;
-    margin-top: 3px;
-}
+        .sidebar-footer {
+            margin-top: 46px; display: flex; align-items: center; gap: 10px;
+            color: #8b98c4; font-size: 13px; border-top: 1px solid rgba(255,255,255,0.06);
+            padding-top: 18px;
+        }
+        .sidebar-footer i { color: #6f8bff; font-size: 18px; }
 
-.risk-card {
-    background: rgba(255,255,255,0.035);
-    border: 1px solid rgba(255,255,255,.10);
-    border-radius: 18px;
-    padding: 18px;
-    margin: 9px 0;
-    backdrop-filter: blur(10px);
-}
-.risk-card.critical { border-left: 4px solid #FF4B4B; box-shadow: -6px 0 24px rgba(255,75,75,.08); }
-.risk-card.medium { border-left: 4px solid #FF9F1C; box-shadow: -6px 0 24px rgba(255,159,28,.07); }
-.risk-card.low { border-left: 4px solid #00B4D8; }
-.risk-card.safe { border-left: 4px solid #00E676; }
+        /* ---------- Top bar ---------- */
+        .top-bar {
+            display: flex; justify-content: flex-end; align-items: center; gap: 8px;
+            color: #cfd8ff; font-size: 15px; margin-bottom: 10px;
+        }
+        .top-bar i { color: #8ea2ff; }
 
-.severity {
-    font-size: 11px;
-    font-weight: 900;
-    letter-spacing: .7px;
-    padding: 5px 9px;
-    border-radius: 999px;
-    display: inline-block;
-}
-.severity.critical { color:#FF7B7B; background:rgba(255,75,75,.11); border:1px solid rgba(255,75,75,.35); }
-.severity.medium { color:#FFC46B; background:rgba(255,159,28,.11); border:1px solid rgba(255,159,28,.35); }
-.severity.low { color:#72E7FF; background:rgba(0,180,216,.11); border:1px solid rgba(0,180,216,.35); }
-.severity.safe { color:#6DFFB2; background:rgba(0,230,118,.10); border:1px solid rgba(0,230,118,.30); }
+        /* ---------- Hero banner ---------- */
+        .hero-box {
+            position: relative; overflow: hidden;
+            background: radial-gradient(circle at 15% 20%, rgba(90,70,220,0.35), transparent 60%),
+                        radial-gradient(circle at 85% 65%, rgba(40,110,220,0.30), transparent 55%),
+                        linear-gradient(135deg, #0c1230 0%, #0a1128 60%, #0c1330 100%);
+            border: 1px solid rgba(110,140,255,0.18);
+            border-radius: 20px;
+            padding: 36px 40px;
+            margin-bottom: 22px;
+        }
+        .hero-brand { display: flex; align-items: center; gap: 16px; margin-bottom: 6px; }
+        .hero-brand-icon {
+            width: 58px; height: 58px; border-radius: 14px;
+            background: linear-gradient(135deg, #7b5cff, #3aa6ff);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 26px; color: white;
+            box-shadow: 0 0 22px rgba(100,140,255,0.5);
+        }
+        .hero-title { font-size: 36px; font-weight: 800; color: #ffffff; margin: 0; line-height: 1.15; }
+        .hero-title .grad {
+            display: block;
+            background: linear-gradient(90deg, #7b8cff, #c07bff);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .hero-tagline { font-size: 19px; font-weight: 600; color: #eef1ff; margin-top: 16px; }
+        .hero-desc { color: #a6b2d9; font-size: 15px; margin-top: 8px; max-width: 560px; line-height: 1.55; }
 
-.section-title {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 22px;
-    font-weight: 700;
-    margin: 4px 0 12px;
-}
-.mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
+        /* Hero right-side document graphic */
+        .hero-graphic {
+            position: relative;
+            height: 190px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .doc-card {
+            position: relative;
+            width: 130px; height: 165px;
+            background: linear-gradient(160deg, #f4f7ff, #d8e2ff);
+            border-radius: 14px;
+            box-shadow: 0 10px 40px rgba(60,90,255,0.35);
+            padding: 22px 16px;
+        }
+        .doc-line { height: 7px; border-radius: 4px; background: #7f8fc9; margin-bottom: 12px; }
+        .doc-line.short { width: 55%; background: #2f3b6b; }
+        .doc-line.w1 { width: 90%; }
+        .doc-line.w2 { width: 75%; }
+        .doc-line.w3 { width: 85%; }
+        .doc-line.w4 { width: 60%; }
+        .warn-badge {
+            position: absolute; bottom: -18px; right: -22px;
+            width: 66px; height: 66px; border-radius: 50%;
+            background: #0b1330;
+            border: 4px solid #e2e8ff;
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+        }
+        .warn-badge i { color: #ff4d5e; font-size: 26px; }
+        .sparkle { position: absolute; color: #a68bff; opacity: 0.8; }
+        .sparkle.s1 { top: 18px; left: -6px; font-size: 20px; transform: rotate(-15deg);}
+        .sparkle.s2 { bottom: 30px; left: 6px; font-size: 14px; }
+        .sparkle.s3 { top: 10px; right: 4px; font-size: 16px; }
 
-div.stButton > button, div.stDownloadButton > button {
-    border-radius: 12px;
-    border: 1px solid rgba(0,180,216,.30);
-    background: rgba(0,180,216,.07);
-    color: #DDFBFF;
-    font-weight: 700;
-    transition: .2s ease;
-}
-div.stButton > button:hover, div.stDownloadButton > button:hover {
-    border-color: #00B4D8;
-    box-shadow: 0 0 22px rgba(0,180,216,.22);
-    transform: translateY(-1px);
-}
-.stProgress > div > div > div > div { background-image: linear-gradient(90deg,#FF4B4B,#FF9F1C,#00E676); }
+        /* ---------- Feature cards ---------- */
+        .feature-card {
+            background: #0d1326;
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 14px; padding: 18px 16px; height: 100%;
+            transition: transform 0.15s ease, border-color 0.15s ease;
+        }
+        .feature-card:hover { border-color: rgba(120,140,255,0.4); transform: translateY(-2px); }
+        .feature-icon {
+            width: 42px; height: 42px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 18px; margin-bottom: 12px;
+        }
+        .icon-purple { background: rgba(140,90,255,0.18); color: #b98bff; }
+        .icon-blue   { background: rgba(60,120,255,0.18); color: #6fa8ff; }
+        .icon-green  { background: rgba(30,190,150,0.15); color: #35d9ab; }
+        .icon-indigo { background: rgba(120,90,255,0.18); color: #a48bff; }
+        .feature-title { color: #f2f4ff; font-weight: 700; font-size: 15px; margin-bottom: 6px; }
+        .feature-text { color: #93a1c9; font-size: 13px; line-height: 1.4; }
 
-[data-testid="stChatMessage"] {
-    background: rgba(255,255,255,.025);
-    border: 1px solid rgba(255,255,255,.07);
-    border-radius: 16px;
-}
-.small-muted { color:#8F9AAA; font-size:12px; }
-.warning-box {
-    padding: 12px 14px; border-radius: 12px;
-    background: rgba(255,159,28,.08);
-    border: 1px solid rgba(255,159,28,.25);
-    color: #FFD28A;
-}
-</style>
-""",
+        /* ---------- Upload card ---------- */
+        .upload-card {
+            background: #0d1326; border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 16px; padding: 24px 28px; margin-top: 22px;
+        }
+        .upload-card h3 { color: #ffffff; margin: 0 0 2px 0; font-size: 19px; }
+        .upload-card h3 i { color: #6fa8ff; margin-right: 8px; }
+        .upload-card p { color: #93a1c9; font-size: 13.5px; margin: 0 0 14px 0; }
+
+        [data-testid="stFileUploaderDropzone"] {
+            background: rgba(20,28,60,0.4) !important;
+            border: 2px dashed rgba(100,130,255,0.45) !important;
+            border-radius: 14px !important;
+        }
+        [data-testid="stFileUploaderDropzone"] button {
+            background: linear-gradient(90deg, #3a6dff, #7b5cff) !important;
+            color: white !important; border: none !important; border-radius: 8px !important;
+        }
+
+        .tip-box {
+            margin-top: 16px; background: rgba(60,110,255,0.08);
+            border: 1px solid rgba(100,130,255,0.25); border-radius: 10px;
+            padding: 12px 16px; color: #b9c4ea; font-size: 13.5px;
+        }
+        .tip-box i { color: #ffd166; margin-right: 6px; }
+
+        /* ---------- Right side panels ---------- */
+        .panel {
+            background: #0d1326; border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 16px; padding: 20px 20px; margin-bottom: 18px;
+        }
+        .panel-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+        .panel-header-icon {
+            width: 36px; height: 36px; border-radius: 10px;
+            display: flex; align-items: center; justify-content: center; font-size: 16px;
+        }
+        .panel-title { color: #ffffff; font-weight: 700; font-size: 16px; }
+
+        .step-row { display: flex; gap: 12px; align-items: flex-start; padding-bottom: 16px; }
+        .step-num {
+            min-width: 26px; height: 26px; border-radius: 50%;
+            background: linear-gradient(135deg, #3a6dff, #7b5cff); color: white;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 12.5px; font-weight: 700;
+        }
+        .step-text { color: #c7d0f0; font-size: 14px; padding-top: 3px; }
+
+        .sample-desc { color: #93a1c9; font-size: 13.5px; line-height: 1.5; margin-bottom: 14px; }
+
+        .dont-worry { text-align: center; }
+        .dont-worry .shield {
+            width: 50px; height: 50px; border-radius: 12px;
+            background: rgba(110,140,255,0.15);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 22px; margin: 0 auto 12px auto; color: #7b93ff; position: relative;
+        }
+        .dont-worry .shield .check {
+            position: absolute; bottom: -4px; right: -4px;
+            background: #2ee6a6; color: #08351f; border-radius: 50%;
+            width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+            font-size: 10px; border: 2px solid #0d1326;
+        }
+        .dont-worry h4 { color: #ffffff; margin: 0 0 8px 0; }
+        .dont-worry p { color: #93a1c9; font-size: 13.5px; line-height: 1.5; }
+
+        div.stButton > button { border-radius: 8px; }
+    </style>
+    """,
     unsafe_allow_html=True,
 )
 
-
-# --------------------------- Data model ------------------------
-
-@dataclass
-class Risk:
-    severity: str
-    category: str
-    title: str
-    clause: str
-    explanation: str
-    recommendation: str
-    section: str
-    confidence: int
-
-
-# ------------------------- Sample contracts --------------------
-
-SAMPLES = {
-    "Exploitative NDA": """
-MUTUAL CONFIDENTIALITY AGREEMENT
-
-1. Confidential Information
-All information disclosed by either party shall be confidential.
-
-2. Term
-This Agreement shall remain effective for ten (10) years. Confidentiality obligations survive forever.
-
-3. Remedies
-The Receiving Party shall indemnify the Disclosing Party for any and all losses, costs, claims, damages, penalties, attorneys' fees and expenses arising from any disclosure, without limitation.
-
-4. Intellectual Property
-All ideas, improvements, suggestions, derivative works, feedback, and inventions disclosed or created during discussions shall belong exclusively to the Disclosing Party.
-
-5. Termination
-The Disclosing Party may terminate this Agreement at any time, without notice. The Receiving Party may not terminate this Agreement.
-
-6. Dispute Resolution
-Any dispute shall be resolved by binding arbitration in a location selected by the Disclosing Party. The arbitrator's decision shall be final.
-
-7. Data
-The Receiving Party may process personal information as reasonably necessary. No separate privacy, security, retention, deletion, or breach-notification requirements apply.
-""",
-    "Unfair SaaS SLA": """
-SOFTWARE-AS-A-SERVICE AGREEMENT
-
-1. Fees
-Customer shall pay the fees stated in the Order Form plus any service, platform, processing, support, storage, security, integration, or administrative fees introduced by Provider from time to time.
-
-2. Changes
-Provider may change pricing and service terms at any time. Continued use constitutes acceptance.
-
-3. Availability
-Provider will use commercially reasonable efforts to provide the service. No uptime commitment, service credit, or measurable performance target is guaranteed.
-
-4. Suspension
-Provider may immediately suspend access for any reason, including suspected misuse, without prior notice or cure period.
-
-5. Liability
-Customer agrees to indemnify Provider for all claims, losses, damages, costs, and expenses arising out of Customer's use of the service, with no cap.
-
-6. Termination
-Provider may terminate immediately for convenience. Customer receives no refund for prepaid fees.
-
-7. Force Majeure
-No force majeure provision is provided.
-
-8. Privacy and Security
-Provider may process Customer Data as necessary to provide services. No specific breach notification deadline, deletion obligation, or security standard is stated.
-""",
-    "Vendor Lock-in Contract": """
-ENTERPRISE VENDOR SERVICES AGREEMENT
-
-1. Exclusivity
-Customer shall purchase all services in the covered category exclusively from Vendor during the Term.
-
-2. Term
-The initial term is five years and automatically renews for additional five-year periods unless Customer gives notice at least 180 days before renewal.
-
-3. Exit
-Customer may not terminate for convenience. Early termination requires payment of all remaining committed fees.
-
-4. Data Portability
-Vendor will provide data exports only in Vendor's proprietary format. No migration assistance is included.
-
-5. Audit
-Vendor may audit Customer at any time. Customer has no reciprocal audit right.
-
-6. Liability
-Vendor's liability is limited to one month's fees, except Customer's payment and indemnity obligations, which are unlimited.
-
-7. Disputes
-Disputes will be handled under laws selected by Vendor in a forum selected by Vendor.
-
-8. Business Continuity
-No disaster recovery, business continuity, recovery-time objective, or recovery-point objective is guaranteed.
-""",
-}
-
-
-# --------------------------- Utilities --------------------------
-
-def extract_docx(data: bytes) -> str:
-    """Extract visible paragraph text from DOCX without requiring python-docx."""
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
-    xml = re.sub(r"</w:p>", "\n", xml)
-    xml = re.sub(r"<w:tab[^>]*/>", "\t", xml)
-    xml = re.sub(r"<[^>]+>", "", xml)
-    return html.unescape(xml)
-
-
-def parse_file(uploaded) -> str:
-    name = uploaded.name.lower()
-    data = uploaded.getvalue()
-    if name.endswith(".pdf"):
-        if PdfReader is None:
-            raise ValueError("PDF support is unavailable because pypdf is not installed. Please redeploy with the included requirements.txt.")
-        reader = PdfReader(io.BytesIO(data))
-        return "\n".join((page.extract_text() or "") for page in reader.pages)
-    if name.endswith(".txt"):
-        return data.decode("utf-8", errors="ignore")
-    if name.endswith(".docx"):
-        return extract_docx(data)
-    raise ValueError("Unsupported file type")
-
-
-def clean_text(text: str) -> str:
-    text = text.replace("\x00", " ")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def split_text(text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
-    """Legal-friendly recursive-ish splitter: paragraphs -> sentences -> words."""
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    pieces = []
-    for p in paragraphs:
-        if len(p) <= chunk_size:
-            pieces.append(p)
-            continue
-        sentences = re.split(r"(?<=[.!?])\s+", p)
-        current = ""
-        for sentence in sentences:
-            if len(current) + len(sentence) + 1 <= chunk_size:
-                current = (current + " " + sentence).strip()
-            else:
-                if current:
-                    pieces.append(current)
-                tail = current[-overlap:] if current else ""
-                current = (tail + " " + sentence).strip()
-        if current:
-            pieces.append(current)
-
-    # Final safety pass by characters.
-    final = []
-    for piece in pieces:
-        if len(piece) <= chunk_size:
-            final.append(piece)
-        else:
-            start = 0
-            while start < len(piece):
-                end = min(len(piece), start + chunk_size)
-                final.append(piece[start:end])
-                if end == len(piece):
-                    break
-                start = max(start + 1, end - overlap)
-    return final
-
-
-def sentence_windows(text: str) -> List[str]:
-    return [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if x.strip()]
-
-
-def section_name(text: str, fallback: str = "Unnumbered clause") -> str:
-    m = re.search(r"(?i)\b(?:section|clause|article)?\s*([0-9]+(?:\.[0-9]+)*)\b", text[:160])
-    if m:
-        return f"Section {m.group(1)}"
-    m = re.search(r"(?m)^\s*([0-9]+(?:\.[0-9]+)*)[.)]\s+([^\n]+)", text)
-    if m:
-        return f"Section {m.group(1)} — {m.group(2).strip()[:80]}"
-    return fallback
-
-
-def quote_from_context(text: str, pattern: str) -> str:
-    for sentence in sentence_windows(text):
-        if re.search(pattern, sentence, flags=re.I):
-            return sentence[:500]
-    return text[:500]
-
-
-# ------------------------- Risk engine --------------------------
-
-def detect_risks(text: str, sensitivity: int = 55) -> List[Risk]:
-    risks: List[Risk] = []
-
-    def add(severity, category, title, pattern, explanation, recommendation, confidence=90):
-        quote = quote_from_context(text, pattern)
-        risks.append(
-            Risk(
-                severity=severity,
-                category=category,
-                title=title,
-                clause=quote,
-                explanation=explanation,
-                recommendation=recommendation,
-                section=section_name(quote),
-                confidence=confidence,
-            )
-        )
-
-    # 1) Liability poison pills
-    if re.search(r"indemnif\w*.*(all|any).*(loss|damage|claim|cost|expense)|without limitation|unlimited indemn", text, re.I | re.S):
-        add(
-            "Critical", "Liability Poison Pill",
-            "Uncapped indemnification exposure",
-            r"indemnif\w*|without limitation|unlimited",
-            "The clause can shift an open-ended financial risk to one party. A broad indemnity without a cap, exclusions, procedure, or causation standard can become a material balance-sheet liability.",
-            "Add a liability cap, mutual indemnity structure, third-party claim procedure, causation threshold, exclusions for the indemnitee's negligence, and a duty to mitigate.",
-        )
-
-    if re.search(r"(may|can).{0,40}(terminate|suspend).{0,80}(any time|at any time|for any reason|without notice|immediately)", text, re.I | re.S):
-        add(
-            "Critical", "Liability Poison Pill",
-            "Unilateral termination / suspension power",
-            r"(terminate|suspend).{0,100}(any time|for any reason|without notice|immediately)",
-            "One-sided exit or suspension rights can let a counterparty disrupt operations before the affected party can cure a breach or transition services.",
-            "Require material breach, written notice, a reasonable cure period, emergency exceptions, transition assistance, and refund/credit treatment where appropriate.",
-        )
-
-    if re.search(r"(binding arbitration|arbitration).{0,150}(location|forum|selected).{0,80}(party|provider|disclosing|vendor)", text, re.I | re.S):
-        add(
-            "Critical", "Liability Poison Pill",
-            "Forum-controlled arbitration",
-            r"(binding arbitration|arbitration).{0,150}(location|forum|selected)",
-            "A dispute clause that lets one side select the venue can increase procedural cost and create a home-court advantage.",
-            "Specify a neutral venue, governing law, allocation of fees, procedural rules, and a mutually agreed arbitrator-selection mechanism.",
-        )
-
-    if re.search(r"(all|any).{0,70}(ideas|feedback|inventions|improvements|derivative works).{0,100}(belong|owned|assign)", text, re.I | re.S):
-        add(
-            "Critical", "Liability Poison Pill",
-            "Broad IP transfer trap",
-            r"(ideas|feedback|inventions|improvements|derivative works).{0,100}(belong|owned|assign)",
-            "The language may capture pre-existing IP, independently developed materials, feedback, or generalized know-how beyond the intended transaction.",
-            "Carve out background IP and independently developed materials; define deliverables precisely; grant only the minimum license or assignment necessary.",
-        )
-
-    # 2) Missing safeguards
-    if not re.search(r"force majeure|act of god|disaster|unforeseeable", text, re.I):
-        add(
-            "Medium", "Missing Essential Safeguard",
-            "Force majeure protection is missing",
-            r"force majeure|act of god|disaster",
-            "The agreement does not appear to allocate risk for qualifying events outside a party's reasonable control.",
-            "Add a force majeure clause covering qualifying events, notice, mitigation, suspension mechanics, and termination after a defined prolonged period.",
-            confidence=96,
-        )
-
-    if not re.search(r"privacy|personal data|personal information|gdpr|data protection|data processing", text, re.I):
-        add(
-            "Medium", "Missing Essential Safeguard",
-            "Data privacy protections are missing",
-            r"privacy|personal data|personal information|gdpr|data protection",
-            "No clear data-protection framework was detected. That can leave roles, processing purposes, security, retention, and incident obligations undefined.",
-            "Add data roles, permitted processing, security controls, subprocessors, retention/deletion, data-subject rights, cross-border transfer terms, and incident notification.",
-            confidence=97,
-        )
-    elif not re.search(r"breach.{0,100}(notice|notification)|incident.{0,100}(notice|notification)|notify.{0,60}(breach|incident)", text, re.I | re.S):
-        add(
-            "Medium", "Missing Essential Safeguard",
-            "Security incident notification is unclear",
-            r"breach|incident|security",
-            "Privacy language exists, but a concrete security-incident notification commitment was not detected.",
-            "Define a notification deadline, escalation contact, minimum incident details, cooperation obligations, and update cadence.",
-            confidence=82,
-        )
-
-    if not re.search(r"cure period|cure.{0,50}(days|day)|remedy.{0,50}(days|day)|written notice.{0,100}(days|day)", text, re.I | re.S):
-        add(
-            "Medium", "Missing Essential Safeguard",
-            "Cure period is missing",
-            r"cure|remedy|written notice",
-            "A breach may trigger remedies without a defined opportunity to cure. This increases the risk of abrupt termination, suspension, or litigation.",
-            "Add written notice and a commercially reasonable cure period, with a shorter emergency window for urgent security or confidentiality breaches.",
-            confidence=94,
-        )
-
-    # 3) Compliance / regulatory gaps
-    if re.search(r"(OWASP|API|application|software|SaaS|platform|security)", text, re.I) and not re.search(
-        r"security.{0,100}(standard|control|testing)|penetration test|vulnerability|OWASP|encryption|access control",
-        text, re.I | re.S
-    ):
-        add(
-            "Medium", "Regulatory & Compliance Gap",
-            "Technical security controls are not measurable",
-            r"security|software|SaaS|platform",
-            "The document references a technology service but does not appear to bind the provider to concrete security controls or verification rights.",
-            "Reference measurable security requirements such as encryption, least privilege, logging, vulnerability management, independent assessments, and remediation SLAs.",
-            confidence=79,
-        )
-
-    if re.search(r"customer data|personal data|personal information|data", text, re.I) and not re.search(
-        r"retain|retention|delete|deletion|return.{0,40}data|return.{0,40}information",
-        text, re.I | re.S
-    ):
-        add(
-            "Low", "Regulatory & Compliance Gap",
-            "Data lifecycle is undefined",
-            r"data|information",
-            "The contract discusses data but does not clearly define retention, deletion, or return mechanics.",
-            "Specify retention periods, deletion/return at termination, backup treatment, legal-retention exceptions, and certification where appropriate.",
-            confidence=78,
-        )
-
-    if not re.search(r"notice|written notice|notices", text, re.I):
-        add(
-            "Low", "Regulatory & Compliance Gap",
-            "Formal notice mechanics are missing",
-            r"notice|notices",
-            "A dispute or breach process can become ambiguous when the agreement does not specify how formal notices must be delivered.",
-            "Define permitted delivery methods, notice addresses, effective timing, and contact-update mechanics.",
-            confidence=91,
-        )
-
-    # Sensitivity: lower threshold means surface more pattern variants.
-    if sensitivity < 45 and re.search(r"(automatic|renew|renewal).{0,80}(term|year)", text, re.I | re.S):
-        add(
-            "Low", "Regulatory & Compliance Gap",
-            "Auto-renewal deserves review",
-            r"automatic|renew|renewal",
-            "Automatic renewal can become a lock-in mechanism when notice windows are long or reminders are absent.",
-            "Use a reasonable renewal notice window and require transparent renewal pricing and reminder notices.",
-            confidence=73,
-        )
-
-    # De-duplicate by title.
-    unique = {}
-    for r in risks:
-        unique[(r.category, r.title)] = r
-    risks = list(unique.values())
-
-    sev_order = {"Critical": 0, "Medium": 1, "Low": 2, "Safe": 3}
-    return sorted(risks, key=lambda x: (sev_order[x.severity], -x.confidence))
-
-
-# ---------------------- Local NumPy RAG --------------------------
-
-def _hash_vector(text: str, dim: int = 768) -> np.ndarray:
-    """Create a deterministic lightweight text vector without ML packages."""
-    vec = np.zeros(dim, dtype=np.float32)
-    tokens = re.findall(r"[a-z0-9]{2,}", text.lower())
-    if not tokens:
-        return vec
-    for token in tokens:
-        idx = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16) % dim
-        vec[idx] += 1.0
-    norm = np.linalg.norm(vec)
-    if norm:
-        vec /= norm
-    return vec
-
-
-@st.cache_data(show_spinner=False)
-def build_vector_store(chunks: Tuple[str, ...]):
-    """Build a dependency-light local vector store using only NumPy."""
-    return np.vstack([_hash_vector(chunk) for chunk in chunks]) if chunks else np.empty((0, 768), dtype=np.float32)
-
-
-def retrieve(query: str, chunks: List[str], k: int = 4) -> List[Tuple[str, float]]:
-    if not chunks:
-        return []
-    vectors = build_vector_store(tuple(chunks))
-    q = _hash_vector(query)
-    scores = vectors @ q
-    limit = min(k, len(chunks))
-    ids = np.argsort(scores)[::-1][:limit]
-    return [(chunks[int(i)], float(scores[int(i)])) for i in ids]
-
-def deterministic_adversarial_answer(query: str, contexts: List[Tuple[str, float]], risks: List[Risk]) -> str:
-    q = query.lower()
-    matched = []
-
-    for risk in risks:
-        terms = re.findall(r"[a-zA-Z]{5,}", risk.title.lower())
-        overlap = sum(1 for t in terms if t in q)
-        if overlap:
-            matched.append((overlap, risk))
-
-    matched.sort(key=lambda x: -x[0])
-
-    lines = [
-        "### Red-Team Assessment",
-        "",
-        "I am treating the prompt as an adversarial contract test, not as legal advice.",
-    ]
-
-    if matched:
-        risk = matched[0][1]
-        lines += [
-            "",
-            f"**Most relevant finding:** {risk.title} — **{risk.severity}**",
-            f"> {risk.clause}",
-            "",
-            f"**Attack surface:** {risk.explanation}",
-            "",
-            f"**Defensive fix:** {risk.recommendation}",
-            "",
-            f"**Citation:** {risk.section}",
-        ]
-    elif contexts:
-        best = contexts[0][0]
-        lines += [
-            "",
-            "**Relevant retrieved context:**",
-            f"> {best[:900]}",
-            "",
-            "The local RAG index found the above clause context. A real red-team review should map the scenario to definitions, exceptions, remedies, and termination mechanics elsewhere in the agreement.",
-        ]
-    else:
-        lines += ["", "No relevant document context was available."]
-
-    if any(x in q for x in ["hidden fee", "charge", "pricing", "fee"]):
-        lines += [
-            "",
-            "**Fee-abuse test:** check whether the agreement allows new fees by unilateral notice, incorporates external pricing pages, or makes continued use equal acceptance.",
-        ]
-    if any(x in q for x in ["terminate", "termination", "suspend"]):
-        lines += [
-            "",
-            "**Exit-abuse test:** check who controls termination, whether notice is required, whether there is a cure period, and what happens to prepaid amounts and customer data.",
-        ]
-    if any(x in q for x in ["data", "privacy", "gdpr", "breach"]):
-        lines += [
-            "",
-            "**Data-abuse test:** check purpose limitation, subprocessors, security controls, incident notice, retention/deletion, and cross-border transfer language.",
-        ]
-
-    return "\n".join(lines)
-
-
-# ----------------------- Scoring / exports ----------------------
-
-def calculate_scores(risks: List[Risk], text: str) -> Dict[str, int]:
-    critical = sum(r.severity == "Critical" for r in risks)
-    medium = sum(r.severity == "Medium" for r in risks)
-    low = sum(r.severity == "Low" for r in risks)
-
-    risk_score = min(100, critical * 24 + medium * 11 + low * 4)
-    # Penalize documents with no risk findings less aggressively.
-    if len(text) < 250:
-        risk_score = min(100, risk_score + 10)
-
-    safeguard_terms = ["force majeure", "privacy", "data", "cure", "termination", "liability", "notice"]
-    present = sum(bool(re.search(term, text, re.I)) for term in safeguard_terms)
-    enforceability = max(0, min(100, 45 + present * 8 - critical * 7 - medium * 3))
-    enforceability = int(enforceability)
-
-    return {
-        "risk": int(risk_score),
-        "enforceability": enforceability,
-        "red_flags": critical + medium,
-        "missing_safeguards": sum("Missing Essential Safeguard" in r.category for r in risks),
-    }
-
-
-def build_report(doc_name: str, text: str, risks: List[Risk], scores: Dict[str, int]) -> str:
-    lines = [
-        "# 🛡️ DocuMind Red-Teamer — Executive Audit Report",
-        "",
-        f"**Document:** {doc_name}",
-        f"**Risk Score:** {scores['risk']}/100",
-        f"**Enforceability Score:** {scores['enforceability']}/100",
-        f"**Red Flags:** {scores['red_flags']}",
-        f"**Missing Safeguards:** {scores['missing_safeguards']}",
-        "",
-        "> Automated red-team screening. Not legal advice. Findings require review by qualified counsel.",
-        "",
-        "## Executive Summary",
-        "",
-        "DocuMind Red-Teamer adversarially screened the document for liability poison pills, missing safeguards, compliance gaps, and exploitable contract mechanics.",
-        "",
-        "## Findings",
-        "",
-    ]
-    for i, r in enumerate(risks, 1):
-        lines += [
-            f"### {i}. [{r.severity}] {r.title}",
-            f"**Category:** {r.category}",
-            f"**Section:** {r.section}",
-            "",
-            f"**Clause:** {r.clause}",
-            "",
-            f"**Threat:** {r.explanation}",
-            "",
-            f"**Recommended counter-clause:** {r.recommendation}",
-            "",
-        ]
-    lines += [
-        "## Top Red-Team Questions",
-        "",
-        "- Can the counterparty change price, scope, or service terms unilaterally?",
-        "- Can the counterparty terminate or suspend without notice or cure?",
-        "- Are indemnities and liability exceptions capped and reciprocal?",
-        "- Who owns background IP, feedback, improvements, and independently developed work?",
-        "- What happens to data, access, and prepaid fees after termination?",
-        "",
-        "## Document Snapshot",
-        "",
-        f"- Characters analyzed: {len(text):,}",
-        f"- Risk findings: {len(risks)}",
-        "- Retrieval: local FAISS semantic index",
-        "- Embedding model: sentence-transformers / all-MiniLM-L6-v2",
-    ]
-    return "\n".join(lines)
-
-
-def simple_pdf_bytes(report: str) -> bytes:
-    """Create a dependency-light PDF with reportlab when available."""
-    from reportlab.lib.pagesizes import LETTER
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.lib.enums import TA_LEFT
-    from reportlab.lib import colors
-
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=LETTER,
-        rightMargin=42,
-        leftMargin=42,
-        topMargin=42,
-        bottomMargin=42,
-        title="DocuMind Red-Teamer Executive Audit",
-    )
-    styles = getSampleStyleSheet()
-    styles["Title"].textColor = colors.HexColor("#0d1117")
-    styles["Heading2"].textColor = colors.HexColor("#8A2BE2")
-    story = []
-    for block in report.split("\n\n"):
-        if block.startswith("# "):
-            story.append(Paragraph(html.escape(block[2:]), styles["Title"]))
-        elif block.startswith("## "):
-            story.append(Paragraph(html.escape(block[3:]), styles["Heading2"]))
-        elif block.startswith("### "):
-            story.append(Paragraph(html.escape(block[4:]), styles["Heading3"]))
-        else:
-            safe = html.escape(block).replace("\n", "<br/>")
-            story.append(Paragraph(safe, styles["BodyText"]))
-        story.append(Spacer(1, 8))
-    doc.build(story)
-    return buffer.getvalue()
-
-
-# -------------------------- Session state -----------------------
-
-if "doc_text" not in st.session_state:
-    st.session_state.doc_text = ""
-if "doc_name" not in st.session_state:
-    st.session_state.doc_name = ""
-if "chat" not in st.session_state:
-    st.session_state.chat = []
-if "sample_loaded" not in st.session_state:
-    st.session_state.sample_loaded = False
-
-
-# ------------------------------ Header --------------------------
-
-st.markdown(
-    """
-<div class="hero">
-  <h1>🛡️ DocuMind Red-Teamer</h1>
-  <p>Red-teaming legal contracts before your opponent does.</p>
-  <span class="badge">● LOCAL RAG ONLINE &nbsp; • &nbsp; FAISS INDEX READY &nbsp; • &nbsp; SECURITY-FIRST MODE</span>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# ----------------------------- Sidebar --------------------------
-
+# ----------------------------------------------------------------------------
+# SIDEBAR
+# ----------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## ⚙️ Red-Team Console")
-    st.caption("Upload a contract or launch a vulnerable sample in one click.")
-
-    uploaded = st.file_uploader(
-        "Contract / policy",
-        type=["pdf", "txt", "docx"],
-        help="Supported: PDF, TXT and DOCX.",
-    )
-
-    st.markdown("### ⚡ One-click attack targets")
-    for sample_name in SAMPLES:
-        if st.button(sample_name, use_container_width=True, key=f"sample_{sample_name}"):
-            st.session_state.doc_text = clean_text(SAMPLES[sample_name])
-            st.session_state.doc_name = sample_name
-            st.session_state.sample_loaded = True
-            st.session_state.chat = []
-            st.rerun()
-
-    if uploaded is not None:
-        try:
-            parsed = clean_text(parse_file(uploaded))
-            st.session_state.doc_text = parsed
-            st.session_state.doc_name = uploaded.name
-            st.session_state.sample_loaded = False
-            st.session_state.chat = []
-        except Exception as exc:
-            st.error(f"Could not parse document: {exc}")
-
-    st.markdown("---")
-    st.markdown("### 🎚️ Scan controls")
-    sensitivity = st.slider(
-        "Risk sensitivity",
-        min_value=20,
-        max_value=90,
-        value=55,
-        step=5,
-        help="Higher values prioritize stronger signals; lower values surface more exploratory findings.",
-    )
-
-    categories = st.multiselect(
-        "Threat categories",
-        [
-            "Liability Poison Pill",
-            "Missing Essential Safeguard",
-            "Regulatory & Compliance Gap",
-        ],
-        default=[
-            "Liability Poison Pill",
-            "Missing Essential Safeguard",
-            "Regulatory & Compliance Gap",
-        ],
-    )
-
-    st.markdown("---")
-    st.markdown(
-        '<div class="small-muted">⚠️ Automated screening only. This prototype does not provide legal advice or replace counsel.</div>',
-        unsafe_allow_html=True,
-    )
-
-# -------------------------- Empty state -------------------------
-
-if not st.session_state.doc_text:
     st.markdown(
         """
-<div class="glass">
-  <div class="section-title">🚀 Launch an adversarial audit</div>
-  <p style="color:#AAB5C4">
-    Upload a PDF/TXT/DOCX or choose a pre-built vulnerable contract from the sidebar.
-    The local engine extracts clauses, creates 800-character chunks with 100-character overlap,
-    indexes them in a lightweight local NumPy vector store, and runs deterministic legal red-team detectors.
-  </p>
-  <div class="warning-box">Judge demo tip: start with <b>Exploitative NDA</b> for an instant visible threat scorecard.</div>
-</div>
-""",
+        <div class="brand-wrap">
+            <div class="brand-icon"><i class="fa-solid fa-shield-halved"></i></div>
+            <div class="brand-title">DocuMind<span>Red-Teamer</span></div>
+        </div>
+        <div class="brand-subtitle">Legal &amp; Contract<br/>Vulnerability Agent</div>
+        """,
         unsafe_allow_html=True,
     )
-    st.stop()
 
-# ------------------------- Run analysis -------------------------
+    for label, icon_class in NAV_ITEMS:
+        is_active = st.session_state.active_page == label
+        if st.button(label, key=f"nav_{label}", use_container_width=True):
+            st.session_state.active_page = label
+        if is_active:
+            st.markdown(f"<div class='nav-active-tag'>● currently viewing</div>", unsafe_allow_html=True)
 
-with st.spinner("Building local vector context + running red-team detectors..."):
-    chunks = split_text(st.session_state.doc_text, 800, 100)
-    all_risks = detect_risks(st.session_state.doc_text, sensitivity)
-    risks = [r for r in all_risks if r.category in categories]
-    scores = calculate_scores(risks, st.session_state.doc_text)
+    st.markdown(
+        """
+        <div class="sidebar-footer">
+            <i class="fa-solid fa-shield-halved"></i>
+            <div>Smarter Contracts.<br/>Safer Decisions.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-# Build FAISS lazily but show status.
-try:
-    _ = build_vector_store(tuple(chunks))
-    rag_status = "LOCAL VECTOR ONLINE"
-except Exception as exc:
-    rag_status = f"VECTOR ERROR: {str(exc)[:45]}"
-
+# ----------------------------------------------------------------------------
+# TOP BAR
+# ----------------------------------------------------------------------------
 st.markdown(
-    f'<div class="glass" style="margin-bottom:14px"><b>📄 {html.escape(st.session_state.doc_name)}</b>'
-    f' &nbsp; <span class="small-muted">• {len(st.session_state.doc_text):,} chars • {len(chunks)} legal chunks • {rag_status}</span></div>',
+    """
+    <div class="top-bar"><i class="fa-solid fa-user"></i>&nbsp; Samia &nbsp;<i class="fa-solid fa-chevron-down"></i></div>
+    """,
     unsafe_allow_html=True,
 )
 
-# ------------------------------- Tabs ---------------------------
+# ----------------------------------------------------------------------------
+# MAIN LAYOUT
+# ----------------------------------------------------------------------------
+main_col, side_col = st.columns([3, 1], gap="large")
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    [
-        "📊 Executive Audit Dashboard",
-        "🔍 Vulnerability Matrix & Context",
-        "⚔️ Adversarial Simulator",
-        "📜 Raw Document & Vector Chunks",
+with main_col:
+    hero_left, hero_right = st.columns([2, 1])
+    with hero_left:
+        st.markdown(
+            """
+            <div class="hero-brand">
+                <div class="hero-brand-icon"><i class="fa-solid fa-shield-halved"></i></div>
+                <p class="hero-title">DocuMind<span class="grad">Red-Teamer</span></p>
+            </div>
+            <p class="hero-tagline">Find hidden risks in your legal &amp; contract documents.</p>
+            <p class="hero-desc">Upload a document, and let DocuMind check for issues like
+            unfair terms, compliance gaps and security risks.</p>
+            """,
+            unsafe_allow_html=True,
+        )
+    with hero_right:
+        st.markdown(
+            """
+            <div class="hero-graphic">
+                <i class="fa-solid fa-sparkle sparkle s1"></i>
+                <i class="fa-solid fa-sparkle sparkle s2"></i>
+                <i class="fa-solid fa-sparkle sparkle s3"></i>
+                <div class="doc-card">
+                    <div class="doc-line short"></div>
+                    <div class="doc-line w1"></div>
+                    <div class="doc-line w2"></div>
+                    <div class="doc-line w3"></div>
+                    <div class="doc-line w4"></div>
+                    <div class="warn-badge"><i class="fa-solid fa-triangle-exclamation"></i></div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('<div style="height:6px"></div>', unsafe_allow_html=True)
+
+    # We need to close the hero-box container that visually wraps both columns.
+    # Since Streamlit columns can't be nested inside one raw div easily, we
+    # simulate the boxed look by wrapping the whole hero row instead (see CSS
+    # trick below via markdown wrapper before/after using st.container).
+
+    # ---- Feature cards ----
+    f1, f2, f3, f4 = st.columns(4, gap="medium")
+    features = [
+        (f1, "icon-purple", "fa-shield-halved", "Find Hidden Clauses", "Detect unfair or risky language."),
+        (f2, "icon-blue", "fa-file-lines", "Check Compliance", "Ensure policy & law alignment."),
+        (f3, "icon-green", "fa-triangle-exclamation", "Assess Legal Risks", "Identify potential liabilities."),
+        (f4, "icon-indigo", "fa-lightbulb", "Get Simple Insights", "Clear results, easy to understand."),
     ]
-)
-
-# ============================ TAB 1 =============================
-
-with tab1:
-    st.markdown('<div class="section-title">Executive Threat Scorecard</div>', unsafe_allow_html=True)
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    risk_color = "#00E676" if scores["risk"] < 30 else "#FF9F1C" if scores["risk"] < 65 else "#FF4B4B"
-    enforce_color = "#FF4B4B" if scores["enforceability"] < 45 else "#FF9F1C" if scores["enforceability"] < 70 else "#00E676"
-
-    with c1:
-        st.markdown(
-            f'<div class="metric-card"><div class="metric-label">Threat Score</div>'
-            f'<div class="metric-value" style="color:{risk_color}">{scores["risk"]}/100</div>'
-            f'<div class="metric-sub">Higher = more exploitable</div></div>',
-            unsafe_allow_html=True,
-        )
-    with c2:
-        st.markdown(
-            f'<div class="metric-card"><div class="metric-label">Red Flags</div>'
-            f'<div class="metric-value" style="color:#FF4B4B">{scores["red_flags"]}</div>'
-            f'<div class="metric-sub">Critical + medium findings</div></div>',
-            unsafe_allow_html=True,
-        )
-    with c3:
-        st.markdown(
-            f'<div class="metric-card"><div class="metric-label">Missing Safeguards</div>'
-            f'<div class="metric-value" style="color:#FF9F1C">{scores["missing_safeguards"]}</div>'
-            f'<div class="metric-sub">Protection gaps detected</div></div>',
-            unsafe_allow_html=True,
-        )
-    with c4:
-        st.markdown(
-            f'<div class="metric-card"><div class="metric-label">Enforceability</div>'
-            f'<div class="metric-value" style="color:{enforce_color}">{scores["enforceability"]}/100</div>'
-            f'<div class="metric-sub">Heuristic contract health</div></div>',
-            unsafe_allow_html=True,
-        )
-
-    st.write("")
-    left, right = st.columns([1.15, 1])
-
-    with left:
-        st.markdown(
-            '<div class="glass"><div class="section-title">📊 Severity Breakdown</div>',
-            unsafe_allow_html=True,
-        )
-        critical_count = sum(r.severity.lower() == "critical" for r in risks)
-        medium_count = sum(r.severity.lower() == "medium" for r in risks)
-        low_count = sum(r.severity.lower() == "low" for r in risks)
-        total = max(1, len(risks))
-
-        severity_rows = [
-            ("🔴 Critical", critical_count, "#FF4B4B"),
-            ("🟠 Medium", medium_count, "#FF9F1C"),
-            ("🟢 Low", low_count, "#00E676"),
-        ]
-
-        for label, count, bar_color in severity_rows:
-            pct = (count / total) * 100
+    for col, icon_cls, icon, title, text in features:
+        with col:
             st.markdown(
                 f"""
-                <div style="display:flex;justify-content:space-between;margin-top:14px;">
-                    <span><b>{label}</b></span><span>{count}</span>
-                </div>
-                <div style="height:10px;background:rgba(255,255,255,.08);border-radius:8px;margin:6px 0 10px;">
-                    <div style="height:10px;width:{pct:.1f}%;background:{bar_color};border-radius:8px;"></div>
+                <div class="feature-card">
+                    <div class="feature-icon {icon_cls}"><i class="fa-solid {icon}"></i></div>
+                    <div class="feature-title">{title}</div>
+                    <div class="feature-text">{text}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-        st.markdown("</div>", unsafe_allow_html=True)
 
-    with right:
-        st.markdown('<div class="glass"><div class="section-title">🎯 Top deal-breakers</div>', unsafe_allow_html=True)
-        if risks:
-            for r in risks[:3]:
-                cls = r.severity.lower()
-                st.markdown(
-                    f'<div class="risk-card {cls}"><span class="severity {cls}">{r.severity.upper()}</span>'
-                    f'<b style="margin-left:8px">{html.escape(r.title)}</b>'
-                    f'<div class="small-muted" style="margin-top:7px">{html.escape(r.explanation[:230])}...</div></div>',
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.success("No selected-category vulnerabilities were detected.")
-        st.markdown("</div>", unsafe_allow_html=True)
+    # ---- Upload section ----
+    st.markdown(
+        """
+        <div class="upload-card">
+            <h3><i class="fa-solid fa-file-lines"></i>Upload Your Contract</h3>
+            <p>Choose a file (PDF, DOCX or TXT) and click Analyze.</p>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    st.markdown("### 🔥 Recommended first moves")
-    recs = []
-    for r in risks[:5]:
-        recs.append(f"**{r.title}:** {r.recommendation}")
-    if recs:
-        for rec in recs:
-            st.markdown(f"- {rec}")
-    else:
-        st.info("No recommendations generated for the selected categories.")
+    uploaded_file = st.file_uploader(
+        "Drag & drop your file here",
+        type=["pdf", "docx", "txt"],
+        label_visibility="collapsed",
+    )
+    st.caption("Supported formats: PDF, DOCX, TXT (Max 10MB)")
 
-    report = build_report(st.session_state.doc_name, st.session_state.doc_text, risks, scores)
-    pdf = simple_pdf_bytes(report)
-    d1, d2 = st.columns(2)
-    with d1:
-        st.download_button(
-            "⬇️ Download Executive Markdown",
-            data=report,
-            file_name="documind_executive_audit.md",
-            mime="text/markdown",
-            use_container_width=True,
-        )
-    with d2:
-        st.download_button(
-            "⬇️ Download Executive PDF",
-            data=pdf,
-            file_name="documind_executive_audit.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
+    analyze_col, _ = st.columns([1, 3])
+    with analyze_col:
+        analyze_clicked = st.button("Analyze", use_container_width=True, type="primary")
 
-# ============================ TAB 2 =============================
+    if uploaded_file is not None:
+        st.success(f"Uploaded: **{uploaded_file.name}**")
+        if analyze_clicked:
+            with st.spinner("Analyzing contract for risks..."):
+                time.sleep(1.2)
+            st.info("✅ Demo mode — hook this up to your risk-analysis backend to show real results.")
+    elif analyze_clicked:
+        st.warning("Please upload a contract file first.")
 
-with tab2:
-    st.markdown('<div class="section-title">Vulnerability Matrix</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    if not risks:
-        st.success("No findings match the current filters.")
-    else:
-        for i, r in enumerate(risks, 1):
-            cls = r.severity.lower()
-            with st.expander(f"{r.severity}  •  {r.category}  •  {r.title}", expanded=(i <= 2)):
-                st.markdown(
-                    f'<div class="risk-card {cls}"><span class="severity {cls}">{r.severity.upper()}</span>'
-                    f'<span class="small-muted" style="margin-left:8px">Confidence {r.confidence}%</span></div>',
-                    unsafe_allow_html=True,
-                )
-                a, b = st.columns(2)
-                with a:
-                    st.markdown("**📌 Exact clause / context**")
-                    st.code(r.clause, language="text")
-                    st.markdown(f"**Section:** `{r.section}`")
-                with b:
-                    st.markdown("**⚔️ Why an adversary cares**")
-                    st.write(r.explanation)
-                    st.markdown("**🛡️ Recommended counter-clause / redline direction**")
-                    st.success(r.recommendation)
+    st.markdown(
+        """
+        <div class="tip-box"><i class="fa-solid fa-lightbulb"></i><b>Tip:</b> You can also try the sample contract from the sidebar to see how it works!</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-# ============================ TAB 3 =============================
+with side_col:
+    st.markdown(
+        """
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-header-icon icon-blue"><i class="fa-solid fa-rocket"></i></div>
+                <div class="panel-title">Quick Start</div>
+            </div>
+            <div class="step-row"><div class="step-num">1</div><div class="step-text">Upload a contract file</div></div>
+            <div class="step-row"><div class="step-num">2</div><div class="step-text">Click on Analyze</div></div>
+            <div class="step-row"><div class="step-num">3</div><div class="step-text">View the risks and insights</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-with tab3:
-    st.markdown('<div class="section-title">Adversarial Scenario Simulator</div>', unsafe_allow_html=True)
-    st.caption("Ask how a clause could be abused. Responses are grounded in the local semantic retrieval index and detected findings.")
+    st.markdown(
+        """
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-header-icon icon-blue"><i class="fa-solid fa-file-lines"></i></div>
+                <div class="panel-title">Sample Document</div>
+            </div>
+            <div class="sample-desc">You can test the app with a sample contract.</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("Use Sample Contract", use_container_width=True):
+        st.session_state.active_page = "Upload Contract"
+        st.toast("Sample contract loaded!")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    quick_prompts = [
-        "How could a vendor exploit the contract to charge hidden fees?",
-        "How could the counterparty terminate or suspend service unfairly?",
-        "What is the biggest IP ownership trap?",
-        "How could a data breach become a liability gap?",
-    ]
-
-    qcols = st.columns(4)
-    for idx, prompt in enumerate(quick_prompts):
-        with qcols[idx]:
-            if st.button(prompt, key=f"qp_{idx}", use_container_width=True):
-                st.session_state.chat.append(("user", prompt))
-                contexts = retrieve(prompt, chunks, 4)
-                answer = deterministic_adversarial_answer(prompt, contexts, risks)
-                st.session_state.chat.append(("assistant", answer))
-                st.rerun()
-
-    for role, message in st.session_state.chat:
-        with st.chat_message(role):
-            st.markdown(message)
-
-    prompt = st.chat_input("e.g. How can a vendor exploit Section 4 to charge hidden fees?")
-    if prompt:
-        st.session_state.chat.append(("user", prompt))
-        with st.spinner("Retrieving adversarial context..."):
-            contexts = retrieve(prompt, chunks, 4)
-            answer = deterministic_adversarial_answer(prompt, contexts, risks)
-        st.session_state.chat.append(("assistant", answer))
-        st.rerun()
-
-# ============================ TAB 4 =============================
-
-with tab4:
-    st.markdown('<div class="section-title">Transparency Layer</div>', unsafe_allow_html=True)
-    st.caption("Judge/debug mode: inspect extracted text and the exact semantic chunks indexed by the local vector retrieval backend.")
-
-    r1, r2 = st.columns(2)
-    with r1:
-        st.markdown("**📜 Extracted document text**")
-        st.text_area(
-            "raw",
-            st.session_state.doc_text,
-            height=520,
-            label_visibility="collapsed",
-        )
-    with r2:
-        st.markdown(f"**🧩 Vector chunks ({len(chunks)})**")
-        for i, chunk in enumerate(chunks):
-            with st.expander(f"Chunk {i+1}", expanded=False):
-                st.code(chunk, language="text")
-
-    st.markdown("---")
-    st.markdown("**Engine metadata**")
-    metadata = {
-        "document": st.session_state.doc_name,
-        "chunk_size": 800,
-        "chunk_overlap": 100,
-        "vector_index": "NumPy hashed-vector cosine retrieval",
-        "embedding_model": "None (dependency-light local retrieval)",
-        "risk_modules": [
-            "Liability Poison Pills",
-            "Missing Essential Safeguards",
-            "Regulatory & Compliance Gaps",
-            "Adversarial Scenario Simulator",
-        ],
-    }
-    st.json(metadata)
+    st.markdown(
+        """
+        <div class="panel dont-worry">
+            <div class="shield">
+                <i class="fa-solid fa-shield-halved"></i>
+                <div class="check"><i class="fa-solid fa-check"></i></div>
+            </div>
+            <h4>Don't worry!</h4>
+            <p>This is just a learning project made for the hackathon. 🙂</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
